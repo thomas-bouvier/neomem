@@ -26,7 +26,7 @@ K = 100
 # num_representatives
 M = 65
 # num_samples
-R = 2
+R = 20
 # batch_size
 B = 128
 
@@ -45,7 +45,7 @@ if __name__ == "__main__":
 
     # https://github.com/pytorch/pytorch/issues/5059
     values = np.random.rand(5000, 3, 32, 32)
-    labels = np.random.rand(5000)
+    labels = np.random.randint(0, K, 5000)
     dataset = MyDataset(values, labels)
     loader = DataLoader(dataset=dataset, batch_size=128,
                         shuffle=True, num_workers=4, pin_memory=True)
@@ -54,4 +54,5 @@ if __name__ == "__main__":
         for inputs, target in loader:
             sl.accumulate(inputs, target, aug_samples, aug_labels, aug_weights)
             size = sl.wait()
-            print(size, inputs, aug_samples)
+            print(aug_samples.shape, aug_labels.shape, aug_weights.shape)
+            print(aug_labels[-R:], aug_weights[-R:])
