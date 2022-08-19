@@ -47,8 +47,11 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     std::vector<tl::provider_handle> provider_handles;
     tl::remote_procedure get_samples_procedure;
 
+    std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
     rehearsal_map_t get_samples(const std::vector<int>& indices);
-    void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices);
+    void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) const;
+    void populate_rehearsal_buffer(const queue_item_t& batch, int batch_size);
+    void update_representative_weights(int effective_representatives, int batch_size);
     void async_process();
 
 public:

@@ -75,33 +75,8 @@ void distributed_stream_loader_t::async_process() {
             batch.aug_weights.index_put_({i}, 1.0);
         }
 
-        // selection without replacement from remote nodes + current node
-        // get_samples in Python
-        const unsigned int max_global_index = provider_handles.size() * K * N;
-        std::uniform_int_distribution<unsigned int> dice(0, max_global_index - 1);
-        std::vector<unsigned int> choices(R);
-        int i = 0;
-        while (i < R) {
-            int random_global_index = dice(rand_gen);
-            if (std::find(choices.begin(), choices.end(), random_global_index) != choices.end())
-                continue;
-            choices[i++] = random_global_index;
-        }
-
-        // group indices per node
+        auto indices_per_node = pick_random_indices(R);
         int j = batch_size;
-        // map remote node indices to local indices
-        std::unordered_map<int, std::vector<int>> indices_per_node;
-        for (size_t i = 0; i < choices.size(); i++) {
-            int global_index = choices[i];
-            int local_index = global_index % (K * N);
-            size_t node = global_index / (K * N);
-            assert(node >= 0 && node < provider_handles.size());
-            if (indices_per_node.find(node) == indices_per_node.end())
-                indices_per_node.emplace(node, std::vector<int>());
-            indices_per_node[node].push_back(local_index);
-        }
-
         for (const auto& indices : indices_per_node) {
             // how many tensors returned by the current node?
             auto options = torch::TensorOptions().dtype(torch::kFloat32);
@@ -145,40 +120,79 @@ void distributed_stream_loader_t::async_process() {
         lock.unlock();
         request_cond.notify_one();
 
-        // update the rehearsal buffer
-        // accumulate in Python
-        dice.param(std::uniform_int_distribution<unsigned int>::param_type(0, batch_size - 1));
-        for (int i = 0; i < batch_size; i++) {
-            if (dice(rand_gen) >= C)
-                break;
-            int label = 0;
-            if (task_type == Classification)
-                label = batch.targets[i].item<int>();
-            buffer_t& buffer = rehearsal_map[label].second;
-            representative_t repr;
-            repr.emplace_back(batch.samples.index({i}));
-            if (task_type == Reconstruction)
-                repr.emplace_back(batch.targets.index({i}));
-            if (buffer.size() < N) {
-                buffer.emplace_back(repr);
-                rehearsal_size++;
-            } else {
-                unsigned int index = dice(rand_gen);
-                if (index < N)
-                    buffer[index] = repr;
-            }
-            counts[label]++;
-            history_count++;
-        }
-        // update weight
-        double weight = (double) batch_size / (double) (R * rehearsal_size);
-        for (auto& map_it : rehearsal_map) {
-            map_it.second.first = std::max(std::log(counts[map_it.first] * weight), 1.0);
-        }
+        populate_rehearsal_buffer(batch, batch_size);
+        update_representative_weights(R, batch_size);
     }
 }
 
-void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) {
+/**
+ * Selection without replacement from remote nodes + current node
+ * get_samples in Python
+ */
+std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int effective_representatives) {
+    const unsigned int max_global_index = provider_handles.size() * K * N;
+    std::uniform_int_distribution<unsigned int> dice(0, max_global_index - 1);
+    std::vector<unsigned int> choices(effective_representatives);
+    int i = 0;
+    while (i < effective_representatives) {
+        int random_global_index = dice(rand_gen);
+        if (std::find(choices.begin(), choices.end(), random_global_index) != choices.end())
+            continue;
+        choices[i++] = random_global_index;
+    }
+
+    // Map remote node indices to local indices
+    std::unordered_map<int, std::vector<int>> indices_per_node;
+    for (size_t i = 0; i < choices.size(); i++) {
+        int global_index = choices[i];
+        int local_index = global_index % (K * N);
+        size_t node = global_index / (K * N);
+        assert(node >= 0 && node < provider_handles.size());
+        if (indices_per_node.find(node) == indices_per_node.end())
+            indices_per_node.emplace(node, std::vector<int>());
+        indices_per_node[node].push_back(local_index);
+    }
+
+    return indices_per_node;
+}
+
+/**
+ * Accumulate in Python
+ */
+void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch, int batch_size) {
+    std::uniform_int_distribution<unsigned int> dice(0, batch_size - 1);
+    for (int i = 0; i < batch_size; i++) {
+        if (dice(rand_gen) >= C)
+            break;
+        int label = 0;
+        if (task_type == Classification)
+            label = batch.targets[i].item<int>();
+        buffer_t& buffer = rehearsal_map[label].second;
+        representative_t repr;
+        repr.emplace_back(batch.samples.index({i}));
+        if (task_type == Reconstruction)
+            repr.emplace_back(batch.targets.index({i}));
+        if (buffer.size() < N) {
+            buffer.emplace_back(repr);
+            rehearsal_size++;
+        } else {
+            unsigned int index = dice(rand_gen);
+            if (index < N)
+                buffer[index] = repr;
+        }
+        counts[label]++;
+        history_count++;
+    }
+}
+
+void distributed_stream_loader_t::update_representative_weights(int effective_representatives, int batch_size) {
+    double weight = (double) batch_size / (double) (effective_representatives * rehearsal_size);
+    for (auto& map_it : rehearsal_map) {
+        map_it.second.first = std::max(std::log(counts[map_it.first] * weight), 1.0);
+    }
+}
+
+void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) const {
     rehearsal_map_t samples;
     if (rehearsal_size > 0) {
         for (auto index : indices) {
@@ -196,7 +210,9 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         }
     }
 
-    std::cout << "Sending " << samples.size() << " representatives (" << indices.size() << " requested) to remote node (endpoint: " << req.get_endpoint() << ")" << std::endl;
+    std::cout << "Sending " << samples.size() << " representatives ("
+        << indices.size() << " requested) to remote node (endpoint: "
+        << req.get_endpoint() << ")" << std::endl;
 
     // Fill the RDMA buffer with tensors, ordering them by label
     int i = 0;
