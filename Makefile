@@ -1,5 +1,5 @@
 MAIN=rehearsal
-SOURCES=rehearsal.cpp stream_loader.cpp distributed_stream_loader_recon.cpp distributed_stream_loader.cpp
+SOURCES=rehearsal.cpp stream_loader.cpp distributed_stream_loader.cpp
 FLAGS=-O3 -Wall -std=c++14 -fPIC -D_GLIBCXX_USE_CXX11_ABI=0
 
 # Bogdan:
@@ -19,6 +19,6 @@ CC=g++
 all:
 	$(CC) -shared $(FLAGS) $(INCLUDES) $(SOURCES) -o $(MAIN)$(EXT) $(LIBS)
 test:
-	$(CC) -g $(FLAGS) $(INCLUDES) distributed_stream_loader_recon.cpp distributed_stream_loader.cpp main.cpp -o $(MAIN) $(LIBS)
+	$(CC) -g $(FLAGS) $(INCLUDES) distributed_stream_loader.cpp main.cpp -o $(MAIN) $(LIBS)
 clean:
 	rm -rf $(MAIN)*.so *~

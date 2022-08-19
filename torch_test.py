@@ -46,47 +46,36 @@ if __name__ == "__main__":
     random.seed(0)
     np.random.seed(0)
 
-    """
-    sl = rehearsal.StreamLoader(
-        K, N, C, ctypes.c_int64(torch.random.initial_seed()).value)
-
     # https://github.com/pytorch/pytorch/issues/5059
     values = np.random.rand(5000, 3, 224, 224)
     labels = np.random.randint(0, K, 5000)
     dataset = MyDataset(values, labels)
-    loader = DataLoader(dataset=dataset, batch_size=128,
+    loader = DataLoader(dataset=dataset, batch_size=B,
                         shuffle=True, num_workers=4, pin_memory=True)
 
-    for epoch in range(10):
-        for i, (inputs, target) in enumerate(loader):
-            inputs, target = inputs.cuda(), target.cuda()
-            print(f"================================{i} (epoch: {epoch})")
-            sl.accumulate(inputs, target, aug_samples, aug_labels, aug_weights)
-            size = sl.wait()
-
     dsl = rehearsal.DistributedStreamLoader(
-        K, N, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", [])
+        rehearsal.Classification, K, N, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", [], 1, [3, 224, 224])
 
-    for epoch in range(10):
+    for epoch in range(4):
         for i, (inputs, target) in enumerate(loader):
-            inputs, target = inputs.cuda(), target.cuda()
+            #inputs, target = inputs.cuda(), target.cuda()
             print(f"================================{i} (epoch: {epoch})")
             dsl.accumulate(inputs, target, aug_samples, aug_labels, aug_weights)
             size = dsl.wait()
-    """
+
 
     values_recon = np.random.rand(5000, 1, 128, 128)
     target_recon = np.random.rand(5000, 1, 128, 128)
     dataset = MyDataset(values_recon, target_recon)
-    loader = DataLoader(dataset=dataset, batch_size=128,
+    loader = DataLoader(dataset=dataset, batch_size=B,
                         shuffle=True, num_workers=4, pin_memory=True)
 
-    dsl_recon = rehearsal.DistributedStreamLoaderRecon(
-        N_recon, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", [])
+    dsl2 = rehearsal.DistributedStreamLoader(
+        rehearsal.Reconstruction, 1, N_recon, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", [], 2, [1, 128, 128])
 
-    for epoch in range(10):
+    for epoch in range(4):
         for i, (inputs, target) in enumerate(loader):
             #inputs, target = inputs.cuda(), target.cuda()
             print(f"================================{i} (epoch: {epoch})")
-            dsl_recon.accumulate(inputs, target, aug_samples_recon, aug_targets_recon, aug_weights_recon)
-            size = dsl_recon.wait()
+            dsl2.accumulate(inputs, target, aug_samples_recon, aug_targets_recon, aug_weights_recon)
+            size = dsl2.wait()

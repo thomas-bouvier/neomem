@@ -14,16 +14,16 @@
 using namespace torch::indexing;
 
 
-distributed_stream_loader_t::distributed_stream_loader_t(unsigned int _K, unsigned int _N, unsigned int _C,
+distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C,
     int64_t seed, uint16_t server_id, const std::string& server_address,
-    std::vector<std::pair<int, std::string>>& endpoints)
+    std::vector<std::pair<int, std::string>>& endpoints, unsigned int _num_samples_per_representative, std::vector<long> _representative_shape)
         : tl::provider<distributed_stream_loader_t>([](uint16_t provider_id, const std::string& address) -> tl::engine& {
             static tl::engine myServer(address, THALLIUM_SERVER_MODE);
             std::cout << "Server running at address " << myServer.self()
                 << " with provider id " << provider_id << std::endl;
             return myServer;
-        }(server_id, server_address), server_id), K(_K), N(_N),
-        C(_C), rand_gen(seed) {
+        }(server_id, server_address), server_id), task_type(_task_type), K(_K), N(_N),
+        C(_C), rand_gen(seed), num_samples_per_representative(_num_samples_per_representative), representative_shape(_representative_shape) {
     define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     get_samples_procedure = get_engine().define("get_samples");
 
@@ -62,16 +62,16 @@ void distributed_stream_loader_t::async_process() {
         if (!batch.samples.defined())
             break;
         int batch_size = batch.samples.sizes()[0];
-        assert(batch.labels.dim() == 1 && batch_size == batch.labels.sizes()[0]
-            && batch.aug_samples.dim() > 0 && batch.aug_labels.dim() == 1);
+        assert(batch.targets.dim() == 1 && batch_size == batch.targets.sizes()[0]
+            && batch.aug_samples.dim() > 0 && batch.aug_targets.dim() == 1);
         int R = batch.aug_samples.sizes()[0] - batch_size;
-        assert(R > 0 && R + batch_size == batch.aug_labels.sizes()[0]
+        assert(R > 0 && R + batch_size == batch.aug_targets.sizes()[0]
             && R + batch_size == batch.aug_weights.sizes()[0]);
 
         // initialization of the augmented result
         for (int i = 0; i < batch_size; i++) {
             batch.aug_samples.index_put_({i}, batch.samples[i]);
-            batch.aug_labels.index_put_({i}, batch.labels[i]);
+            batch.aug_targets.index_put_({i}, batch.targets[i]);
             batch.aug_weights.index_put_({i}, 1.0);
         }
 
@@ -105,10 +105,10 @@ void distributed_stream_loader_t::async_process() {
         for (const auto& indices : indices_per_node) {
             // how many tensors returned by the current node?
             auto options = torch::TensorOptions().dtype(torch::kFloat32);
-            std::vector<torch::Tensor> tensors(indices.second.size(), torch::zeros({3, 224, 224}, options));
+            std::vector<torch::Tensor> tensors(indices.second.size() * num_samples_per_representative, torch::zeros(representative_shape, options));
             for ([[maybe_unused]] const auto& tensor : tensors)
                 assert(tensor.is_contiguous());
-            std::vector<std::pair<void*, std::size_t>> segments(indices.second.size());
+            std::vector<std::pair<void*, std::size_t>> segments(indices.second.size() * num_samples_per_representative);
             int i = 0;
             for (auto& rdma_tensor : segments) {
                 rdma_tensor.first = tensors[i].data_ptr();
@@ -123,12 +123,17 @@ void distributed_stream_loader_t::async_process() {
             // received RDMA bulk, convert it back to Tensor now :)
             int t = 0;
             for (auto it = metadata.begin(); it != metadata.end(); it++) {
-                int num_labels = it->second.first;
-                for (int i = 0; i < num_labels; i++) {
+                int num_targets = it->second.first;
+                for (int i = 0; i < num_targets; i++) {
                     batch.aug_samples.index_put_({j}, tensors[t]);
-                    batch.aug_labels.index_put_({j}, it->first);
                     batch.aug_weights.index_put_({j}, it->second.second);
-                    t++;
+                    if (task_type == Classification) {
+                        batch.aug_targets.index_put_({j}, it->first);
+                        t++;
+                    } else {
+                        batch.aug_targets.index_put_({j}, tensors[t + 1]);
+                        t += num_samples_per_representative;
+                    }
                     j++;
                 }
             }
@@ -146,15 +151,21 @@ void distributed_stream_loader_t::async_process() {
         for (int i = 0; i < batch_size; i++) {
             if (dice(rand_gen) >= C)
                 break;
-            auto label = batch.labels[i].item<int>();
-            auto &buffer = rehearsal_map[label].second;
+            int label = 0;
+            if (task_type == Classification)
+                label = batch.targets[i].item<int>();
+            buffer_t& buffer = rehearsal_map[label].second;
+            representative_t repr;
+            repr.emplace_back(batch.samples.index({i}));
+            if (task_type == Reconstruction)
+                repr.emplace_back(batch.targets.index({i}));
             if (buffer.size() < N) {
-                buffer.emplace_back(batch.samples.index({i}));
+                buffer.emplace_back(repr);
                 rehearsal_size++;
             } else {
                 unsigned int index = dice(rand_gen);
                 if (index < N)
-                    buffer[index] = batch.samples.index({i});
+                    buffer[index] = repr;
             }
             counts[label]++;
             history_count++;
@@ -176,34 +187,35 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             std::advance(map_it, rehearsal_class % rehearsal_map.size());
             size_t rehearsal_class_index = (index % N) % map_it->second.second.size();
             assert(rehearsal_class_index < map_it->second.second.size());
-            auto sample = map_it->second.second[rehearsal_class_index];
+            auto repr = map_it->second.second[rehearsal_class_index];
             auto label = map_it->first;
             auto weight = map_it->second.first;
             if (samples.find(label) == samples.end())
                 samples.emplace(label, std::make_pair(weight, buffer_t()));
-            samples[label].second.push_back(sample);
+            samples[label].second.push_back(repr);
         }
     }
 
-    std::cout << "Sending " << samples.size() << " samples (" << indices.size() << " requested) to remote node (endpoint: " << req.get_endpoint() << ")" << std::endl;
+    std::cout << "Sending " << samples.size() << " representatives (" << indices.size() << " requested) to remote node (endpoint: " << req.get_endpoint() << ")" << std::endl;
 
-    // fill the RDMA buffer with tensors, ordering them by label
+    // Fill the RDMA buffer with tensors, ordering them by label
     int i = 0;
     std::map<int, std::pair<int, int>> metadata;
-    std::vector<std::pair<void*, std::size_t>> segments(indices.size());
+    std::vector<std::pair<void*, std::size_t>> segments(indices.size() * num_samples_per_representative);
     for (auto it = samples.begin(); it != samples.end(); it++) {
-        auto tensors = it->second.second;
-        auto num = tensors.size();
+        buffer_t reprs = it->second.second;
         auto label = it->first;
         auto weight = it->second.first;
-        metadata.insert({label, {num, weight}});
-        for (auto tensor : tensors) {
-            //TODO: use RDMA from GPU directly...
-            auto contiguous_tensor = tensor.to(torch::kCPU).contiguous();
-            assert(contiguous_tensor.is_contiguous());
-            segments[i].first = contiguous_tensor.data_ptr();
-            segments[i].second = contiguous_tensor.nbytes();
-            i++;
+        metadata.insert({label, {reprs.size(), weight}});
+        for (auto repr : reprs) {
+            for (const auto& tensor : repr) {
+                //TODO: use RDMA from GPU directly...
+                auto contiguous_tensor = tensor.to(torch::kCPU).contiguous();
+                assert(contiguous_tensor.is_contiguous());
+                segments[i].first = contiguous_tensor.data_ptr();
+                segments[i].second = contiguous_tensor.nbytes();
+                i++;
+            }
         }
     }
     for (size_t j = i; j < segments.size(); j++) {
@@ -216,12 +228,12 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     req.respond(metadata);
 }
 
-void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &labels,
-                 const torch::Tensor &aug_samples, const torch::Tensor &aug_labels, const torch::Tensor &aug_weights) {
+void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
+                 const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
         request_cond.wait(lock);
-    request_queue.emplace_back(queue_item_t(samples, labels, aug_samples, aug_labels, aug_weights));
+    request_queue.emplace_back(queue_item_t(samples, targets, aug_samples, aug_targets, aug_weights));
     lock.unlock();
     request_cond.notify_one();
 }
