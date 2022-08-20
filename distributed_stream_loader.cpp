@@ -75,10 +75,13 @@ void distributed_stream_loader_t::async_process() {
             batch.aug_weights.index_put_({i}, 1.0);
         }
 
-        auto indices_per_node = pick_random_indices(R);
+        // R will be greater if last batch has a smaller size
+        std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
+
+        // Iterating over nodes
         int j = batch_size;
         for (const auto& indices : indices_per_node) {
-            // how many tensors returned by the current node?
+            // How many tensors returned by the current node?
             auto options = torch::TensorOptions().dtype(torch::kFloat32);
             std::vector<torch::Tensor> tensors(indices.second.size() * num_samples_per_representative, torch::zeros(representative_shape, options));
             for ([[maybe_unused]] const auto& tensor : tensors)
@@ -95,7 +98,7 @@ void distributed_stream_loader_t::async_process() {
             tl::bulk local_bulk = get_engine().expose(segments, tl::bulk_mode::write_only);
             std::map<int, std::pair<int, int>> metadata = get_samples_procedure.on(ph)(local_bulk, indices.second);
 
-            // received RDMA bulk, convert it back to Tensor now :)
+            // Received RDMA bulk, convert it back to Tensor now :)
             int t = 0;
             for (auto it = metadata.begin(); it != metadata.end(); it++) {
                 int num_targets = it->second.first;
@@ -193,6 +196,7 @@ void distributed_stream_loader_t::update_representative_weights(int effective_re
 }
 
 void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) const {
+    int c = 0;
     rehearsal_map_t samples;
     if (rehearsal_size > 0) {
         for (auto index : indices) {
@@ -207,11 +211,12 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             if (samples.find(label) == samples.end())
                 samples.emplace(label, std::make_pair(weight, buffer_t()));
             samples[label].second.push_back(repr);
+            c++;
         }
     }
 
-    std::cout << "Sending " << samples.size() << " representatives ("
-        << indices.size() << " requested) to remote node (endpoint: "
+    std::cout << "Sending " << c << "/" << indices.size()  << " representatives from "
+        << samples.size() << " different classes to remote node (endpoint: "
         << req.get_endpoint() << ")" << std::endl;
 
     // Fill the RDMA buffer with tensors, ordering them by label
