@@ -2,3 +2,6 @@ Simple skeleton of C++ data loader with rehearsal for Torch.
 Based on PyBind11.
 
 undefined symbol: THPVariableClass -> TORCH_USE_RTLD_GLOBAL=YES
+
+. /home/tbouvier/Dev/spack/share/spack/setup-env.sh && spack load mochi-thallium && make clean && make && make test
+. /home/tbouvier/Dev/spack/share/spack/setup-env.sh && spack load mochi-thallium && . env.sh && TORCH_USE_RTLD_GLOBAL=YES python torch_test.py

@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
         endpoints.push_back(endpoint);
         std::cout << "Endpoint " << endpoint.first << ", " << endpoint.second << std::endl;
     }
-    distributed_stream_loader_t dsl(K, N, C, seed, server_id, server_address, endpoints);
+    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, endpoints, 2, {3, 224, 224});
 
     endpoints.clear();
     while (true) {
@@ -56,20 +56,20 @@ int main(int argc, char** argv) {
     auto batch = random_batch();
     dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
     int size = dsl.wait();
-    std::cout << "size: " << size << std::endl;
+    std::cout << "Received " << size - N << std::endl;
 
     std::cout << "Round 2" << std::endl;
     batch = random_batch();
     dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
     size = dsl.wait();
-    std::cout << "size: " << size << std::endl;
+    std::cout << "Received " << size - N << std::endl;
 
     for (int i = 3; i < 1000; i++) {
         std::cout << "Round " << i << std::endl;
         batch = random_batch();
         dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
         size = dsl.wait();
-        std::cout << "size: " << size << std::endl;
+        std::cout << "Received " << size - N << std::endl;
     }
 
     return 0;
