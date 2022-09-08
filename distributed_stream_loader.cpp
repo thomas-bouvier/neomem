@@ -8,6 +8,8 @@
 #include <thallium/serialization/stl/vector.hpp>
 #include <cereal/types/string.hpp>
 
+#include "mpi_utils.hpp"
+
 #define __DEBUG
 #include "debug.hpp"
 
@@ -15,15 +17,16 @@ using namespace torch::indexing;
 
 
 distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C,
-    int64_t seed, uint16_t server_id, const std::string& server_address,
-    std::vector<std::pair<int, std::string>>& endpoints, unsigned int _num_samples_per_representative, std::vector<long> _representative_shape)
+    int64_t seed, uint16_t _server_id, const std::string& server_address,
+    unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
+    bool discover_endpoints)
         : tl::provider<distributed_stream_loader_t>([](uint16_t provider_id, const std::string& address) -> tl::engine& {
             static tl::engine myServer(address, THALLIUM_SERVER_MODE);
             std::cout << "Server running at address " << myServer.self()
                 << " with provider id " << provider_id << std::endl;
             return myServer;
-        }(server_id, server_address), server_id), task_type(_task_type), K(_K), N(_N),
-        C(_C), rand_gen(seed), num_samples_per_representative(_num_samples_per_representative), representative_shape(_representative_shape) {
+        }(_server_id, server_address), _server_id), task_type(_task_type), K(_K), N(_N),
+        C(_C), rand_gen(seed), server_id(_server_id), num_samples_per_representative(_num_samples_per_representative), representative_shape(_representative_shape) {
     define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     get_samples_procedure = get_engine().define("get_samples");
 
@@ -34,18 +37,42 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
     });
     async_thread = std::move(thread);
 
-    endpoints.push_back(std::make_pair(server_id, server_address));
-    if (endpoints.size() > 0) {
-        std::cout << "endpoint size " << endpoints.size() << std::endl;
-        add_endpoints(endpoints);
+    if (discover_endpoints) {
+        std::map<std::string, int> all_endpoints = gather_endpoints();
+        if (all_endpoints.size() > 0) {
+            std::cout << "endpoint size " << all_endpoints.size() << std::endl;
+            register_endpoints(all_endpoints);
+        }
     }
 }
 
-void distributed_stream_loader_t::add_endpoints(const std::vector<std::pair<int, std::string>>& endpoints) {
+std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const {
+    int rank, num_workers = 0;
+    // MPI has maybe been initialized by horovodrun
+    int mpi_initialized;
+    bool was_initialized = true;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        MPI_Init(NULL, NULL);
+        was_initialized = false;
+    }
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &num_workers);
+
+    std::map<std::string, int> endpoints = {{get_engine().self(), server_id}};
+    auto all_endpoints = gather_dictionary(endpoints, MAX_CF_LENGTH, num_workers, rank);
+
+    if (!was_initialized) {
+        MPI_Finalize();
+    }
+    return all_endpoints;
+}
+
+void distributed_stream_loader_t::register_endpoints(const std::map<std::string, int>& endpoints) {
     for (auto endpoint : endpoints) {
-        std::cout << "Looking up " << endpoint.second << ", " << endpoint.first << std::endl;
-        tl::endpoint server = get_engine().lookup(endpoint.second);
-        provider_handles.emplace_back(tl::provider_handle(server, endpoint.first));
+        std::cout << "Looking up " << endpoint.first << ", " << endpoint.second << std::endl;
+        tl::endpoint server = get_engine().lookup(endpoint.first);
+        provider_handles.emplace_back(tl::provider_handle(server, endpoint.second));
     }
 }
 

@@ -22,6 +22,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     Task task_type;
     unsigned int K, N, C;
     std::default_random_engine rand_gen;
+    uint16_t server_id;
     unsigned int num_samples_per_representative;
     std::vector<long> representative_shape;
 
@@ -53,13 +54,16 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     void populate_rehearsal_buffer(const queue_item_t& batch, int batch_size);
     void update_representative_weights(int effective_representatives, int batch_size);
     void async_process();
+    std::map<std::string, int> gather_endpoints() const;
 
 public:
     distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
         uint16_t server_id, const std::string& server_address,
-        std::vector<std::pair<int, std::string>>& endpoints, unsigned int _num_samples_per_representative = 1, std::vector<long> _representative_shape = {3, 224, 224});
+        unsigned int _num_samples_per_representative,
+        std::vector<long> _representative_shape, bool discover_endpoints = false);
     ~distributed_stream_loader_t();
-    void add_endpoints(const std::vector<std::pair<int, std::string>>& endpoints);
+
+    void register_endpoints(const std::map<std::string, int>& endpoints);
 
     void accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
             const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);

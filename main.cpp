@@ -12,21 +12,19 @@ int64_t seed = 42;
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <server_id> <server_address> [.. <provider_id> <address>]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <server_address> <server_id> [.. <address> <provider_id>]" << std::endl;
         exit(0);
     }
-    uint16_t server_id = atoi(argv[1]);
-    std::string server_address = argv[2];
 
-    std::vector<std::pair<int, std::string>> endpoints;
+    std::string server_address = argv[1];
+    uint16_t server_id = atoi(argv[2]);
+
+    std::map<std::string, int> endpoints;
     for (int i = 3; i < argc; i += 2) {
-        auto endpoint = std::make_pair<>(atoi(argv[i]), std::string(argv[i + 1]));
-        endpoints.push_back(endpoint);
+        auto endpoint = std::make_pair<>(std::string(argv[i]), atoi(argv[i + 1]));
+        endpoints.insert(endpoint);
         std::cout << "Endpoint " << endpoint.first << ", " << endpoint.second << std::endl;
     }
-    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, endpoints, 2, {3, 224, 224});
-
-    endpoints.clear();
     while (true) {
         std::string address;
         int provider_id;
@@ -34,12 +32,14 @@ int main(int argc, char** argv) {
         std::cin >> address;
         if (address == "no") break;
         std::cin >> provider_id;
-        auto endpoint = std::make_pair<>(provider_id, address);
-        endpoints.push_back(endpoint);
+        auto endpoint = std::make_pair<>(address, provider_id);
+        endpoints.insert(endpoint);
         std::cout << "Endpoint " << address << ", " << provider_id << std::endl;
         std::cin.clear();
     }
-    dsl.add_endpoints(endpoints);
+
+    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 2, {3, 224, 224}, endpoints.empty());
+    dsl.register_endpoints(endpoints);
 
     torch::Tensor aug_samples = torch::zeros({N + R, 3, 224, 224});
     torch::Tensor aug_labels = torch::randint(K, {N + R});

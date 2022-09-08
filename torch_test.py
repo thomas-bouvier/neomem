@@ -58,9 +58,11 @@ if __name__ == "__main__":
                         shuffle=True, num_workers=4, pin_memory=True)
 
     dsl1 = rehearsal.DistributedStreamLoader(
-        rehearsal.Classification, K, N, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", [(0, 'tcp://127.0.0.1:1234'), (1, 'tcp://127.0.0.1:1235')], 1, [3, 224, 224])
+        rehearsal.Classification, K, N, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", 1, [3, 224, 224], False)
+    dsl1.register_endpoints([('tcp://127.0.0.1:1234', 0), ('tcp://127.0.0.1:1235', 1)])
     dsl2 = rehearsal.DistributedStreamLoader(
-        rehearsal.Classification, K, N, C, ctypes.c_int64(torch.random.initial_seed()).value, 1, "tcp://127.0.0.1:1235", [(0, 'tcp://127.0.0.1:1234'), (1, 'tcp://127.0.0.1:1235')], 1, [3, 224, 224])
+        rehearsal.Classification, K, N, C, ctypes.c_int64(torch.random.initial_seed()).value, 1, "tcp://127.0.0.1:1235", 1, [3, 224, 224], False)
+    dsl2.register_endpoints([('tcp://127.0.0.1:1234', 0), ('tcp://127.0.0.1:1235', 1)])
 
     for epoch in range(4):
         for i, (inputs, target) in enumerate(loader):
@@ -80,7 +82,7 @@ if __name__ == "__main__":
                         shuffle=True, num_workers=4, pin_memory=True)
 
     dsl_recon = rehearsal.DistributedStreamLoader(
-        rehearsal.Reconstruction, 1, N_recon, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", [], 2, [1, 128, 128])
+        rehearsal.Reconstruction, 1, N_recon, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", 2, [1, 128, 128], False)
 
     for epoch in range(4):
         for i, (inputs, target) in enumerate(loader):
