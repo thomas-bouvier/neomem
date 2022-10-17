@@ -16,6 +16,15 @@
 using namespace torch::indexing;
 
 
+/**
+ * 1- This constructor initializes the provider. This class is both a server and
+ * a client. There are n clients and n servers. Each client can get data from
+ * the n servers. (n x n relation).
+ * 
+ * A client holds some data in a "rehearsal buffer". A client updates the
+ * content of its rehearsal buffer by sampling from the n other rehearsal
+ * buffers.
+ */
 distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C,
     int64_t seed, uint16_t _server_id, const std::string& server_address,
     unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
@@ -25,18 +34,24 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
             std::cout << "Server running at address " << myServer.self()
                 << " with provider id " << provider_id << std::endl;
             return myServer;
-        }(_server_id, server_address), _server_id), task_type(_task_type), K(_K), N(_N),
-        C(_C), rand_gen(seed), server_id(_server_id), num_samples_per_representative(_num_samples_per_representative), representative_shape(_representative_shape) {
-    define("get_samples", &distributed_stream_loader_t::get_remote_samples);
-    get_samples_procedure = get_engine().define("get_samples");
+        }(_server_id, server_address), _server_id), task_type(_task_type),
+        K(_K), N(_N), C(_C), rand_gen(seed), server_id(_server_id),
+        num_samples_per_representative(_num_samples_per_representative),
+        representative_shape(_representative_shape),
+        request_pool(tl::pool::create(tl::pool::access::spmc)) {
 
-    tl::managed<tl::xstream> es = tl::xstream::create();
-    xstream = std::move(es);
-    tl::managed<tl::thread> thread = xstream->make_thread([this]() {
+    // Create a thread pool to serve rpcs sent by clients
+    for (int i = 0; i < 4; i++)
+        ess.emplace_back(tl::xstream::create(tl::scheduler::predef::deflt, *request_pool));
+    define("get_samples", &distributed_stream_loader_t::get_remote_samples, *request_pool);
+
+    // The thread executing the actual client issuing rpcs
+    es = tl::xstream::create();
+    async_thread = es->make_thread([this]() {
         async_process();
     });
-    async_thread = std::move(thread);
 
+    // If enabled, get the remote endpoints via the MPI publishing mechanism
     if (discover_endpoints) {
         std::map<std::string, int> all_endpoints = gather_endpoints();
         if (all_endpoints.size() > 0) {
@@ -44,12 +59,15 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
             register_endpoints(all_endpoints);
         }
     }
+
+    // Register the remote procedure
+    get_samples_procedure = get_engine().define("get_samples");
 }
 
 std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const {
     int rank, num_workers = 0;
     // MPI has maybe been initialized by horovodrun
-    int mpi_initialized;
+    int mpi_initialized = true;
     bool was_initialized = true;
     MPI_Initialized(&mpi_initialized);
     if (!mpi_initialized) {
@@ -76,6 +94,12 @@ void distributed_stream_loader_t::register_endpoints(const std::map<std::string,
     }
 }
 
+/**
+ * 4- This is the client async thread. This method consumes the data pushed into
+ * the request_queue by accumulate(), processes it, samples data from all other
+ * servers, and push the new data into the response_queue (which will be
+ * consumed in turn by wait()).
+ */
 void distributed_stream_loader_t::async_process() {
     while (true) {
         std::unique_lock<tl::mutex> lock(request_mutex);
@@ -85,7 +109,7 @@ void distributed_stream_loader_t::async_process() {
         request_queue.pop_front();
         lock.unlock();
 
-        // an empty batch is a signal for shutdown
+        // An empty batch is a signal for shutdown
         if (!batch.samples.defined())
             break;
         int batch_size = batch.samples.sizes()[0];
@@ -95,7 +119,7 @@ void distributed_stream_loader_t::async_process() {
         assert(R > 0 && R + batch_size == batch.aug_targets.sizes()[0]
             && R + batch_size == batch.aug_weights.sizes()[0]);
 
-        // initialization of the augmented result
+        // Initialization of the augmented result
         for (int i = 0; i < batch_size; i++) {
             batch.aug_samples.index_put_({i}, batch.samples[i]);
             batch.aug_targets.index_put_({i}, batch.targets[i]);
@@ -188,9 +212,12 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
 
 /**
  * Accumulate in Python
+ * Tip: pick indices then replace
  */
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch, int batch_size) {
     std::uniform_int_distribution<unsigned int> dice(0, batch_size - 1);
+    //std::unique_lock<tl::mutex> lock(rehearsal_mutex);
+    std::map<std::pair<int, int>, representative_t> indices_to_replace;
     for (int i = 0; i < batch_size; i++) {
         if (dice(rand_gen) >= C)
             break;
@@ -199,19 +226,38 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
             label = batch.targets[i].item<int>();
         buffer_t& buffer = rehearsal_map[label].second;
         representative_t repr;
-        repr.emplace_back(batch.samples.index({i}));
+        repr.push_back(batch.samples.index({i}).to(torch::kCPU).contiguous());
         if (task_type == Reconstruction)
-            repr.emplace_back(batch.targets.index({i}));
+            repr.push_back(batch.targets.index({i}).to(torch::kCPU).contiguous());
         if (buffer.size() < N) {
-            buffer.emplace_back(repr);
-            rehearsal_size++;
+            //buffer.emplace_back(repr);
+            indices_to_replace.insert({{buffer.size(), label}, repr});
+            //rehearsal_size++;
         } else {
             unsigned int index = dice(rand_gen);
-            if (index < N)
-                buffer[index] = repr;
+            if (index < N) {
+                //buffer[index] = repr;
+                indices_to_replace.insert({{index, label}, repr});
+            }
         }
         counts[label]++;
         history_count++;
+    }
+
+    if (!indices_to_replace.empty()) {
+        std::unique_lock<tl::mutex> lock(rehearsal_mutex);
+        for (auto el : indices_to_replace) {
+            buffer_t& buffer = rehearsal_map[el.first.second].second;
+            int index = el.first.first;
+            if (index < buffer.size()) {
+                buffer[el.first.first] = el.second;
+            } else if (index == buffer.size()) {
+                buffer.emplace_back(el.second);
+                rehearsal_size++;
+            } else {
+                assert(index <= buffer.size());
+            }
+        }
     }
 }
 
@@ -222,7 +268,12 @@ void distributed_stream_loader_t::update_representative_weights(int effective_re
     }
 }
 
-void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) const {
+/**
+ * Tip: keep references in temporary data structure
+ * Tip: no need to lock, tensors are thread safe and we only care about having
+ * valid data, no matter the data
+ */
+void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) {
     int c = 0;
     rehearsal_map_t samples;
     if (rehearsal_size > 0) {
@@ -232,11 +283,14 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             std::advance(map_it, rehearsal_class % rehearsal_map.size());
             size_t rehearsal_class_index = (index % N) % map_it->second.second.size();
             assert(rehearsal_class_index < map_it->second.second.size());
-            auto repr = map_it->second.second[rehearsal_class_index];
+            representative_t repr = map_it->second.second[rehearsal_class_index];
             auto label = map_it->first;
             auto weight = map_it->second.first;
             if (samples.find(label) == samples.end())
                 samples.emplace(label, std::make_pair(weight, buffer_t()));
+            //for (auto& tensor : repr) {
+            //    tensor.to(torch::kCPU).contiguous();
+            //}
             samples[label].second.push_back(repr);
             c++;
         }
@@ -255,13 +309,13 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         auto label = it->first;
         auto weight = it->second.first;
         metadata.insert({label, {reprs.size(), weight}});
-        for (auto repr : reprs) {
+        for (representative_t repr : reprs) {
             for (const auto& tensor : repr) {
                 //TODO: use RDMA from GPU directly...
-                auto contiguous_tensor = tensor.to(torch::kCPU).contiguous();
-                assert(contiguous_tensor.is_contiguous());
-                segments[i].first = contiguous_tensor.data_ptr();
-                segments[i].second = contiguous_tensor.nbytes();
+                //auto contiguous_tensor = tensor.to(torch::kCPU).contiguous();
+                assert(tensor.is_contiguous());
+                segments[i].first = tensor.data_ptr();
+                segments[i].second = tensor.nbytes();
                 i++;
             }
         }
@@ -276,6 +330,11 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     req.respond(metadata);
 }
 
+/**
+ * 2- This is called from Python in a synchronous fashion. We push the incoming
+ * data to the request_queue, to be consumed by the client thread in an
+ * asynchronous fashion. Nothing fancy here.
+ */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
                  const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
     std::unique_lock<tl::mutex> lock(request_mutex);
@@ -286,6 +345,11 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
     request_cond.notify_one();
 }
 
+/**
+ * 3- This is also called from Python in a synchronous fashion. We consume the
+ * data processed by the client thread. If no data is ready, we just wait,
+ * blocking the Python thread.
+ */
 int distributed_stream_loader_t::wait() {
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (response_queue.empty())
@@ -308,22 +372,25 @@ distributed_stream_loader_t::~distributed_stream_loader_t() {
     request_queue.push_back(queue_item_t());
     lock.unlock();
     request_cond.notify_one();
-    async_thread->join();
+    es->join();
+    for (int i = 0; i < 4; i++) {
+        ess[i]->join();
+    }
 
     get_engine().wait_for_finalize();
 }
 
 namespace cereal {
-template<typename A> void save(A& ar, const torch::Tensor& t) {
-    std::stringstream ss;
-    torch::save(t, ss);
-    ar(ss.str());
-}
+    template<typename A> void save(A& ar, const torch::Tensor& t) {
+        std::stringstream ss;
+        torch::save(t, ss);
+        ar(ss.str());
+    }
 
-template<typename A> void load(A& ar, torch::Tensor& t) {
-    std::string s;
-    ar(s);
-    std::stringstream ss(s);
-    torch::load(t, ss);
-}
+    template<typename A> void load(A& ar, torch::Tensor& t) {
+        std::string s;
+        ar(s);
+        std::stringstream ss(s);
+        torch::load(t, ss);
+    }
 }
