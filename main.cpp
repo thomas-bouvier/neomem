@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     while (true) {
         std::string address;
         int provider_id;
-        std::cout << "Additional endpoint? ";
+        std::cout << "Endpoint to sample from (local endpoint is not already-included)? ";
         std::cin >> address;
         if (address == "no") break;
         std::cin >> provider_id;
@@ -38,7 +38,11 @@ int main(int argc, char** argv) {
         std::cin.clear();
     }
 
-    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 2, {3, 224, 224}, endpoints.empty());
+    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 2, {3, 224, 224}, false);
+    std::cout << "size " << endpoints.size() << std::endl;
+    for (auto endpoint : endpoints) {
+        std::cout << "Checking " << endpoint.first << ", " << endpoint.second << std::endl;
+    }
     dsl.register_endpoints(endpoints);
 
     torch::Tensor aug_samples = torch::zeros({N + R, 3, 224, 224});
