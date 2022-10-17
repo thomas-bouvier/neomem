@@ -59,10 +59,10 @@ if __name__ == "__main__":
 
     dsl1 = rehearsal.DistributedStreamLoader(
         rehearsal.Classification, K, N, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", 1, [3, 224, 224], False)
-    dsl1.register_endpoints([('tcp://127.0.0.1:1234', 0), ('tcp://127.0.0.1:1235', 1)])
+    dsl1.register_endpoints({'tcp://127.0.0.1:1234': 0, 'tcp://127.0.0.1:1235': 1})
     dsl2 = rehearsal.DistributedStreamLoader(
         rehearsal.Classification, K, N, C, ctypes.c_int64(torch.random.initial_seed()).value, 1, "tcp://127.0.0.1:1235", 1, [3, 224, 224], False)
-    dsl2.register_endpoints([('tcp://127.0.0.1:1234', 0), ('tcp://127.0.0.1:1235', 1)])
+    dsl2.register_endpoints({'tcp://127.0.0.1:1234': 0, 'tcp://127.0.0.1:1235': 1})
 
     for epoch in range(4):
         for i, (inputs, target) in enumerate(loader):
