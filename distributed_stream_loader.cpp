@@ -301,9 +301,9 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         << req.get_endpoint() << ")" << std::endl;
 
     // Fill the RDMA buffer with tensors, ordering them by label
-    int i = 0;
     std::map<int, std::pair<int, int>> metadata;
-    std::vector<std::pair<void*, std::size_t>> segments(indices.size() * num_samples_per_representative);
+    std::vector<std::pair<void*, std::size_t>> segments;
+    segments.reserve(indices.size() * num_samples_per_representative);
     for (auto it = samples.begin(); it != samples.end(); it++) {
         buffer_t reprs = it->second.second;
         auto label = it->first;
@@ -314,19 +314,18 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
                 //TODO: use RDMA from GPU directly...
                 //auto contiguous_tensor = tensor.to(torch::kCPU).contiguous();
                 assert(tensor.is_contiguous());
-                segments[i].first = tensor.data_ptr();
-                segments[i].second = tensor.nbytes();
-                i++;
+                if (tensor.nbytes() != 0) {
+                    segments.emplace_back(tensor.data_ptr(), tensor.nbytes());
+                }
             }
         }
     }
-    for (size_t j = i; j < segments.size(); j++) {
-        segments[j].first = nullptr;
-        segments[j].second = 0;
-    }
 
-    tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);
-    bulk >> b.on(req.get_endpoint());
+    //get_engine().set_log_level(tl::logger::level::trace);
+    if (segments.size() > 0) {
+        tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);
+        bulk >> b.on(req.get_endpoint());
+    }
     req.respond(metadata);
 }
 
