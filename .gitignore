@@ -9,3 +9,5 @@ min*.py
 *.jpg
 rehearsal
 buffer_metrics*.txt
+.ccls
+.ccls-cache

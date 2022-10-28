@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <iostream>
 #include <random>
+#include <vector>
 
 namespace tl = thallium;
 
@@ -31,6 +32,8 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     size_t history_count = 0;
     size_t rehearsal_size = 0;
 
+    buffer_t rehearsal_vector;
+    std::vector<size_t> rehearsal_metadata;
     struct queue_item_t {
         int aug_size = 0;
         torch::Tensor samples, targets, aug_samples, aug_targets, aug_weights;

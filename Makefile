@@ -1,6 +1,6 @@
 MAIN=rehearsal
 SOURCES=rehearsal.cpp stream_loader.cpp distributed_stream_loader.cpp
-FLAGS=-O3 -Wall -std=c++17 -fPIC -D_GLIBCXX_USE_CXX11_ABI=0
+FLAGS=-O3 -Wall -std=c++17 -fPIC -D_GLIBCXX_USE_CXX11_ABI=0 -D__ASSERT 
 
 TORCH_ROOT?=$(HOME)/.conda/envs/horovod-py39/lib/python3.9/site-packages/torch
 TORCH_INCLUDE=-I$(TORCH_ROOT)/include -I$(TORCH_ROOT)/include/torch/csrc/api/include

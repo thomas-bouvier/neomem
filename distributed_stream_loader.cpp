@@ -40,11 +40,6 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
         representative_shape(_representative_shape),
         request_pool(tl::pool::create(tl::pool::access::spmc)) {
 
-    // Create a thread pool to serve rpcs sent by clients
-    for (int i = 0; i < 4; i++)
-        ess.emplace_back(tl::xstream::create(tl::scheduler::predef::deflt, *request_pool));
-    define("get_samples", &distributed_stream_loader_t::get_remote_samples, *request_pool);
-
     // The thread executing the actual client issuing rpcs
     es = tl::xstream::create();
     async_thread = es->make_thread([this]() {
@@ -62,6 +57,16 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
 
     // Register the remote procedure
     get_samples_procedure = get_engine().define("get_samples");
+    // Create a thread pool to serve rpcs sent by clients
+    for (int i = 0; i < provider_handles.size(); i++)
+        ess.emplace_back(tl::xstream::create(tl::scheduler::predef::deflt, *request_pool));
+    define("get_samples", &distributed_stream_loader_t::get_remote_samples, *request_pool);
+
+    rehearsal_vector.insert(rehearsal_vector.begin(), K * N, representative_t());
+    rehearsal_metadata.insert(rehearsal_metadata.begin(), K, 0);
+
+    margo_profile_start(get_engine().get_margo_instance());
+    margo_diag_start(get_engine().get_margo_instance());
 }
 
 std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const {
@@ -125,8 +130,10 @@ void distributed_stream_loader_t::async_process() {
             batch.aug_targets.index_put_({i}, batch.targets[i]);
             batch.aug_weights.index_put_({i}, 1.0);
         }
+        //TODO maybe some batches change from Python
 
         // R will be greater if last batch has a smaller size
+        //TODO: could be simplified (indices generation)
         std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
 
         // Iterating over nodes
@@ -135,8 +142,10 @@ void distributed_stream_loader_t::async_process() {
             // How many tensors returned by the current node?
             auto options = torch::TensorOptions().dtype(torch::kFloat32);
             std::vector<torch::Tensor> tensors(indices.second.size() * num_samples_per_representative, torch::zeros(representative_shape, options));
+            //TODO: is it contiguous for sure?
+            //TODO: can we see the stderr output from failling asserts? try true == false
             for ([[maybe_unused]] const auto& tensor : tensors)
-                assert(tensor.is_contiguous());
+                ASSERT(tensor.is_contiguous());
             std::vector<std::pair<void*, std::size_t>> segments(indices.second.size() * num_samples_per_representative);
             int i = 0;
             for (auto& rdma_tensor : segments) {
@@ -175,7 +184,7 @@ void distributed_stream_loader_t::async_process() {
         request_cond.notify_one();
 
         populate_rehearsal_buffer(batch, batch_size);
-        update_representative_weights(R, batch_size);
+        //update_representative_weights(R, batch_size);
     }
 }
 
@@ -201,9 +210,7 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
         int global_index = choices[i];
         int local_index = global_index % (K * N);
         size_t node = global_index / (K * N);
-        assert(node >= 0 && node < provider_handles.size());
-        if (indices_per_node.find(node) == indices_per_node.end())
-            indices_per_node.emplace(node, std::vector<int>());
+        ASSERT(node >= 0 && node < provider_handles.size());
         indices_per_node[node].push_back(local_index);
     }
 
@@ -216,47 +223,31 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
  */
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch, int batch_size) {
     std::uniform_int_distribution<unsigned int> dice(0, batch_size - 1);
-    //std::unique_lock<tl::mutex> lock(rehearsal_mutex);
-    std::map<std::pair<int, int>, representative_t> indices_to_replace;
     for (int i = 0; i < batch_size; i++) {
         if (dice(rand_gen) >= C)
             break;
         int label = 0;
         if (task_type == Classification)
             label = batch.targets[i].item<int>();
-        buffer_t& buffer = rehearsal_map[label].second;
         representative_t repr;
-        repr.push_back(batch.samples.index({i}).to(torch::kCPU).contiguous());
+        repr.push_back(batch.samples.index({i}));
         if (task_type == Reconstruction)
-            repr.push_back(batch.targets.index({i}).to(torch::kCPU).contiguous());
-        if (buffer.size() < N) {
-            //buffer.emplace_back(repr);
-            indices_to_replace.insert({{buffer.size(), label}, repr});
-            //rehearsal_size++;
-        } else {
-            unsigned int index = dice(rand_gen);
-            if (index < N) {
-                //buffer[index] = repr;
-                indices_to_replace.insert({{index, label}, repr});
-            }
-        }
-        counts[label]++;
-        history_count++;
-    }
+            repr.push_back(batch.targets.index({i}));
 
-    if (!indices_to_replace.empty()) {
         std::unique_lock<tl::mutex> lock(rehearsal_mutex);
-        for (auto el : indices_to_replace) {
-            buffer_t& buffer = rehearsal_map[el.first.second].second;
-            int index = el.first.first;
-            if (index < buffer.size()) {
-                buffer[el.first.first] = el.second;
-            } else if (index == buffer.size()) {
-                buffer.emplace_back(el.second);
+        int index = -1;
+        if (rehearsal_metadata[label] < N)
+            index = rehearsal_metadata[label];
+        else
+            index = dice(rand_gen);
+        // The random replacement strategy does nothing sometimes
+        if (index < N) {
+            rehearsal_vector[N * label + index] = repr;
+            if (index >= rehearsal_metadata[label]) {
                 rehearsal_size++;
-            } else {
-                assert(index <= buffer.size());
+                rehearsal_metadata[label]++;
             }
+            history_count++;
         }
     }
 }
@@ -274,28 +265,49 @@ void distributed_stream_loader_t::update_representative_weights(int effective_re
  * valid data, no matter the data
  */
 void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) {
+    std::cout << "========" << std::endl;
+    std::cout << "0. rehearsal_size: " << rehearsal_size << std::endl;
+    std::cout << "1. rehearsal_metadata" << std::endl;
+    int i = 0;
+    for (auto it = rehearsal_metadata.begin(); it != rehearsal_metadata.end(); it++, i++) {
+        if (*it != 0) 
+            std::cout << i << ": " << *it << std::endl;
+    }
+
     int c = 0;
     rehearsal_map_t samples;
     if (rehearsal_size > 0) {
         for (auto index : indices) {
             size_t rehearsal_class = index / N;
-            auto map_it = rehearsal_map.begin();
-            std::advance(map_it, rehearsal_class % rehearsal_map.size());
-            size_t rehearsal_class_index = (index % N) % map_it->second.second.size();
-            assert(rehearsal_class_index < map_it->second.second.size());
-            representative_t repr = map_it->second.second[rehearsal_class_index];
-            auto label = map_it->first;
-            auto weight = map_it->second.first;
+            int zeros = std::count(rehearsal_metadata.begin(), rehearsal_metadata.end(), 0);
+            rehearsal_class %= (rehearsal_metadata.size() - zeros);
+            int j = -1, i = 0;
+            for (; i < rehearsal_metadata.size(); i++) {
+                if (rehearsal_metadata[i] == 0)
+                    continue;
+                j++;
+                if (j == rehearsal_class)
+                    break;
+            }
+            size_t rehearsal_class_index = (index % N) % rehearsal_metadata[i];
+            representative_t repr = rehearsal_vector[rehearsal_class_index];
+            for (auto& tensor : repr) {
+                if (!tensor.is_contiguous())
+                    tensor = tensor.to(torch::kCPU).contiguous();
+            }
+            auto label = i;
+            auto weight = 0;
             if (samples.find(label) == samples.end())
                 samples.emplace(label, std::make_pair(weight, buffer_t()));
-            //for (auto& tensor : repr) {
-            //    tensor.to(torch::kCPU).contiguous();
-            //}
             samples[label].second.push_back(repr);
             c++;
         }
     }
 
+    std::cout << "2. samples" << std::endl;
+    for (auto it = samples.begin(); it != samples.end(); it++) {
+        std::cout << it->first << ": " << it->second.second.size() << std::endl;
+    }
     std::cout << "Sending " << c << "/" << indices.size()  << " representatives from "
         << samples.size() << " different classes to remote node (endpoint: "
         << req.get_endpoint() << ")" << std::endl;
@@ -311,17 +323,13 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         metadata.insert({label, {reprs.size(), weight}});
         for (representative_t repr : reprs) {
             for (const auto& tensor : repr) {
-                //TODO: use RDMA from GPU directly...
-                //auto contiguous_tensor = tensor.to(torch::kCPU).contiguous();
-                assert(tensor.is_contiguous());
-                if (tensor.nbytes() != 0) {
+                if (tensor.nbytes() != 0)
                     segments.emplace_back(tensor.data_ptr(), tensor.nbytes());
-                }
             }
         }
     }
 
-    //get_engine().set_log_level(tl::logger::level::trace);
+    get_engine().set_log_level(tl::logger::level::trace);
     if (segments.size() > 0) {
         tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);
         bulk >> b.on(req.get_endpoint());
@@ -372,9 +380,8 @@ distributed_stream_loader_t::~distributed_stream_loader_t() {
     lock.unlock();
     request_cond.notify_one();
     es->join();
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < provider_handles.size(); i++)
         ess[i]->join();
-    }
 
     get_engine().wait_for_finalize();
 }
