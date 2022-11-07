@@ -141,14 +141,16 @@ void distributed_stream_loader_t::async_process() {
         for (const auto& indices : indices_per_node) {
             // How many tensors returned by the current node?
             auto options = torch::TensorOptions().dtype(torch::kFloat32);
-            std::vector<torch::Tensor> tensors(indices.second.size() * num_samples_per_representative, torch::zeros(representative_shape, options));
+            std::vector<torch::Tensor> tensors(indices.second.size() * num_samples_per_representative, torch::full(representative_shape, -1, options));
             //TODO: is it contiguous for sure?
             //TODO: can we see the stderr output from failling asserts? try true == false
+            //TODO check that sizes client/server are matching + check that I'm receiving -2
             for ([[maybe_unused]] const auto& tensor : tensors)
                 ASSERT(tensor.is_contiguous());
             std::vector<std::pair<void*, std::size_t>> segments(indices.second.size() * num_samples_per_representative);
             int i = 0;
             for (auto& rdma_tensor : segments) {
+                std::cout << "Reading " << tensors[i].data_ptr() << " (" << tensors[i].nbytes() << " bytes)" << std::endl; 
                 rdma_tensor.first = tensors[i].data_ptr();
                 rdma_tensor.second = tensors[i].nbytes();
                 i++;
@@ -158,11 +160,16 @@ void distributed_stream_loader_t::async_process() {
             tl::bulk local_bulk = get_engine().expose(segments, tl::bulk_mode::write_only);
             std::map<int, std::pair<int, int>> metadata = get_samples_procedure.on(ph)(local_bulk, indices.second);
 
+            //torch::Tensor single = torch::full({3, 224, 224}, -2, options);
+
             // Received RDMA bulk, convert it back to Tensor now :)
             int t = 0;
             for (auto it = metadata.begin(); it != metadata.end(); it++) {
                 int num_targets = it->second.first;
                 for (int i = 0; i < num_targets; i++) {
+                    //batch.aug_samples.index_put_({j}, single);
+                    //batch.aug_weights.index_put_({j}, it->second.second);
+                    ASSERT(torch.eq(tensors[t], torch::full(representative_shape, -2, options)));
                     batch.aug_samples.index_put_({j}, tensors[t]);
                     batch.aug_weights.index_put_({j}, it->second.second);
                     if (task_type == Classification) {
@@ -233,6 +240,9 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         repr.push_back(batch.samples.index({i}));
         if (task_type == Reconstruction)
             repr.push_back(batch.targets.index({i}));
+        ASSERT(repr.size() == num_samples_per_representative);
+        for (const auto& tensor : repr)
+            ASSERT(tensor.nbytes() != 0);
 
         std::unique_lock<tl::mutex> lock(rehearsal_mutex);
         int index = -1;
@@ -265,17 +275,20 @@ void distributed_stream_loader_t::update_representative_weights(int effective_re
  * valid data, no matter the data
  */
 void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) {
-    std::cout << "========" << std::endl;
-    std::cout << "0. rehearsal_size: " << rehearsal_size << std::endl;
-    std::cout << "1. rehearsal_metadata" << std::endl;
-    int i = 0;
-    for (auto it = rehearsal_metadata.begin(); it != rehearsal_metadata.end(); it++, i++) {
-        if (*it != 0) 
-            std::cout << i << ": " << *it << std::endl;
-    }
-
     int c = 0;
     rehearsal_map_t samples;
+    
+    /*
+    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    for (auto index : indices) {
+        samples.emplace(c, std::make_pair(0, buffer_t()));
+        representative_t repr;
+        repr.push_back(torch::full({3, 224, 224}, -2, options));
+        samples[c].second.push_back(repr);
+        c++;
+    }
+    */
+
     if (rehearsal_size > 0) {
         for (auto index : indices) {
             size_t rehearsal_class = index / N;
@@ -290,11 +303,14 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
                     break;
             }
             size_t rehearsal_class_index = (index % N) % rehearsal_metadata[i];
-            representative_t repr = rehearsal_vector[rehearsal_class_index];
+            representative_t repr = rehearsal_vector[i * N + rehearsal_class_index];
+
+            ASSERT(repr.size() == num_samples_per_representative);
             for (auto& tensor : repr) {
-                if (!tensor.is_contiguous())
-                    tensor = tensor.to(torch::kCPU).contiguous();
+                tensor = tensor.to(torch::kCPU).contiguous();
+                ASSERT(tensor.nbytes() != 0);
             }
+
             auto label = i;
             auto weight = 0;
             if (samples.find(label) == samples.end())
@@ -304,13 +320,12 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         }
     }
 
-    std::cout << "2. samples" << std::endl;
-    for (auto it = samples.begin(); it != samples.end(); it++) {
-        std::cout << it->first << ": " << it->second.second.size() << std::endl;
-    }
     std::cout << "Sending " << c << "/" << indices.size()  << " representatives from "
         << samples.size() << " different classes to remote node (endpoint: "
         << req.get_endpoint() << ")" << std::endl;
+    
+    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    torch::Tensor single = torch::full(representative_shape, -2, options);
 
     // Fill the RDMA buffer with tensors, ordering them by label
     std::map<int, std::pair<int, int>> metadata;
@@ -322,12 +337,23 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         auto weight = it->second.first;
         metadata.insert({label, {reprs.size(), weight}});
         for (representative_t repr : reprs) {
-            for (const auto& tensor : repr) {
-                if (tensor.nbytes() != 0)
-                    segments.emplace_back(tensor.data_ptr(), tensor.nbytes());
+            ASSERT(repr.size() == num_samples_per_representative);
+            for (int i = 0; i < num_samples_per_representative; i++) {
+                if (single.nbytes() != 0) {
+                    std::cout << "Writing " << single.data_ptr() << " (" << single.nbytes() << " bytes)" << std::endl;
+                    segments.emplace_back(single.data_ptr(), single.nbytes());
+                }
             }
+
+            /*
+            for (const auto& tensor : repr) {
+                ASSERT(tensor.nbytes() != 0);
+                segments.emplace_back(tensor.data_ptr(), tensor.nbytes());
+            }
+            */
         }
     }
+    ASSERT(c == segments.size())
 
     get_engine().set_log_level(tl::logger::level::trace);
     if (segments.size() > 0) {
