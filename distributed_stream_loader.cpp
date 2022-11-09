@@ -169,7 +169,7 @@ void distributed_stream_loader_t::async_process() {
                 for (int i = 0; i < num_targets; i++) {
                     //batch.aug_samples.index_put_({j}, single);
                     //batch.aug_weights.index_put_({j}, it->second.second);
-                    ASSERT(torch.eq(tensors[t], torch::full(representative_shape, -2, options)));
+                    ASSERT(torch::equal(tensors[t], torch::full(representative_shape, -2, options)));
                     batch.aug_samples.index_put_({j}, tensors[t]);
                     batch.aug_weights.index_put_({j}, it->second.second);
                     if (task_type == Classification) {
