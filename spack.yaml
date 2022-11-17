@@ -1,0 +1,6 @@
+spack:
+  specs:
+  - mochi-thallium ^argobots+stackunwind ^mercury+debug ^libfabric+debug fabrics=tcp,verbs,rxm
+  - openmpi@4.1.2
+  config:
+    install_tree: ~/.spack/software
