@@ -31,10 +31,8 @@ dictionary gather_dictionary(dictionary &dict, int max_key_length, int num_worke
         displs[i] = displs[i - 1] + recvcounts[i - 1];
     }
 
-    char(*dict_keys)[max_key_length];
-    char(*final_dict_keys)[max_key_length];
-    dict_keys = (char(*)[max_key_length]) malloc(num_keys * sizeof(*dict_keys));
-    final_dict_keys = (char(*)[max_key_length]) malloc(final_num_keys * sizeof(*final_dict_keys));
+    char dict_keys[num_keys][max_key_length];
+    char final_dict_keys[final_num_keys][max_key_length];
 
     // Collect keys for each process
     int i = 0;
@@ -50,10 +48,9 @@ dictionary gather_dictionary(dictionary &dict, int max_key_length, int num_worke
         dict[final_dict_keys[i]] = dict.size();
     }
 
-    delete[] dict_keys;
-    delete[] final_dict_keys;
     delete[] recvcounts;
     delete[] displs;
 
     return dict;
 }
+
