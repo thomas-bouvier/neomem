@@ -30,7 +30,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
     unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
     bool discover_endpoints)
         : tl::provider<distributed_stream_loader_t>([](uint16_t provider_id, const std::string& address) -> tl::engine& {
-            static tl::engine myServer(address, THALLIUM_SERVER_MODE, true);
+            static tl::engine myServer(address, THALLIUM_SERVER_MODE, true, POOL_SIZE);
             std::cout << "Server running at address " << myServer.self()
                 << " with provider id " << provider_id << std::endl;
             return myServer;

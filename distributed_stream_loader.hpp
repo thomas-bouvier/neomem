@@ -19,7 +19,7 @@ typedef std::unordered_map<int, int> rehearsal_counts_t;
 
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
     const size_t MAX_QUEUE_SIZE = 1024;
-    const size_t POOL_SIZE = 4;
+    static const size_t POOL_SIZE = 4;
 
     Task task_type;
     unsigned int K, N, C;
