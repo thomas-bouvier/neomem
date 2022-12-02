@@ -19,6 +19,7 @@ typedef std::unordered_map<int, int> rehearsal_counts_t;
 
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
     const size_t MAX_QUEUE_SIZE = 1024;
+    const size_t POOL_SIZE = 4;
 
     Task task_type;
     unsigned int K, N, C;
@@ -47,9 +48,6 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     tl::condition_variable request_cond;
     tl::mutex rehearsal_mutex;
 
-    // server threads
-    std::vector<tl::managed<tl::xstream>> ess;
-    tl::managed<tl::pool> request_pool;
     // client thread
     tl::managed<tl::xstream> es;
     tl::managed<tl::thread> async_thread;

@@ -30,15 +30,18 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
     unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
     bool discover_endpoints)
         : tl::provider<distributed_stream_loader_t>([](uint16_t provider_id, const std::string& address) -> tl::engine& {
-            static tl::engine myServer(address, THALLIUM_SERVER_MODE);
+            static tl::engine myServer(address, THALLIUM_SERVER_MODE, true);
             std::cout << "Server running at address " << myServer.self()
                 << " with provider id " << provider_id << std::endl;
             return myServer;
         }(_server_id, server_address), _server_id), task_type(_task_type),
         K(_K), N(_N), C(_C), rand_gen(seed), server_id(_server_id),
         num_samples_per_representative(_num_samples_per_representative),
-        representative_shape(_representative_shape),
-        request_pool(tl::pool::create(tl::pool::access::spmc)) {
+        representative_shape(_representative_shape) { 
+
+    define("get_samples", &distributed_stream_loader_t::get_remote_samples);
+    // Register the remote procedure
+    get_samples_procedure = get_engine().define("get_samples");
 
     // The thread executing the actual client issuing rpcs
     es = tl::xstream::create();
@@ -55,18 +58,8 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
         }
     }
 
-    // Register the remote procedure
-    get_samples_procedure = get_engine().define("get_samples");
-    // Create a thread pool to serve rpcs sent by clients
-    for (int i = 0; i < provider_handles.size(); i++)
-        ess.emplace_back(tl::xstream::create(tl::scheduler::predef::deflt, *request_pool));
-    define("get_samples", &distributed_stream_loader_t::get_remote_samples, *request_pool);
-
     rehearsal_vector.insert(rehearsal_vector.begin(), K * N, representative_t());
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, 0);
-
-    margo_profile_start(get_engine().get_margo_instance());
-    margo_diag_start(get_engine().get_margo_instance());
 }
 
 std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const {
@@ -150,7 +143,6 @@ void distributed_stream_loader_t::async_process() {
             std::vector<std::pair<void*, std::size_t>> segments(indices.second.size() * num_samples_per_representative);
             int i = 0;
             for (auto& rdma_tensor : segments) {
-                std::cout << "Reading " << tensors[i].data_ptr() << " (" << tensors[i].nbytes() << " bytes)" << std::endl; 
                 rdma_tensor.first = tensors[i].data_ptr();
                 rdma_tensor.second = tensors[i].nbytes();
                 i++;
@@ -355,7 +347,6 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     }
     ASSERT(c == segments.size())
 
-    get_engine().set_log_level(tl::logger::level::trace);
     if (segments.size() > 0) {
         tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);
         bulk >> b.on(req.get_endpoint());
@@ -405,9 +396,6 @@ distributed_stream_loader_t::~distributed_stream_loader_t() {
     request_queue.push_back(queue_item_t());
     lock.unlock();
     request_cond.notify_one();
-    es->join();
-    for (int i = 0; i < provider_handles.size(); i++)
-        ess[i]->join();
 
     get_engine().wait_for_finalize();
 }
