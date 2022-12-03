@@ -17,14 +17,25 @@ typedef std::vector<representative_t> buffer_t;
 typedef std::unordered_map<int, std::pair<double, buffer_t>> rehearsal_map_t;
 typedef std::unordered_map<int, int> rehearsal_counts_t;
 
-class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
+
+class engine_loader_t {
+    static const unsigned int POOL_SIZE = 4;
+protected:
+    tl::engine server_engine;
+    uint16_t server_id;
+
+public:
+    engine_loader_t(const std::string& server_address, uint16_t server_id);
+    ~engine_loader_t();
+};
+
+
+class distributed_stream_loader_t : public engine_loader_t, public tl::provider<distributed_stream_loader_t> {
     const size_t MAX_QUEUE_SIZE = 1024;
-    static const size_t POOL_SIZE = 4;
 
     Task task_type;
     unsigned int K, N, C;
     std::default_random_engine rand_gen;
-    uint16_t server_id;
     unsigned int num_samples_per_representative;
     std::vector<long> representative_shape;
 
@@ -63,12 +74,6 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     std::map<std::string, int> gather_endpoints() const;
 
 public:
-    /*
-    distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
-        uint16_t server_id, const tl::engine& server,
-        unsigned int _num_samples_per_representative,
-        std::vector<long> _representative_shape, bool discover_endpoints = false);
-    */
     distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
         uint16_t server_id, const std::string& server_address,
         unsigned int _num_samples_per_representative,

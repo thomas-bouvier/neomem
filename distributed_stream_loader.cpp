@@ -16,6 +16,16 @@
 using namespace torch::indexing;
 
 
+engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_id) :
+    server_engine(address, THALLIUM_SERVER_MODE, true, POOL_SIZE) {
+    std::cout << "Server running at address " << server_engine.self()
+                << " with provider id " << provider_id << std::endl;
+}            
+
+engine_loader_t::~engine_loader_t() {
+    server_engine.wait_for_finalize();
+}
+
 /**
  * 1- This constructor initializes the provider. This class is both a server and
  * a client. There are n clients and n servers. Each client can get data from
@@ -29,13 +39,8 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
     int64_t seed, uint16_t _server_id, const std::string& server_address,
     unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
     bool discover_endpoints)
-        : tl::provider<distributed_stream_loader_t>([](uint16_t provider_id, const std::string& address) -> tl::engine& {
-            static tl::engine myServer(address, THALLIUM_SERVER_MODE, true, POOL_SIZE);
-            std::cout << "Server running at address " << myServer.self()
-                << " with provider id " << provider_id << std::endl;
-            return myServer;
-        }(_server_id, server_address), _server_id), task_type(_task_type),
-        K(_K), N(_N), C(_C), rand_gen(seed), server_id(_server_id),
+        : engine_loader_t(server_address, _server_id), tl::provider<distributed_stream_loader_t>(server_engine, _server_id),
+        task_type(_task_type), K(_K), N(_N), C(_C), rand_gen(seed),
         num_samples_per_representative(_num_samples_per_representative),
         representative_shape(_representative_shape) { 
 
