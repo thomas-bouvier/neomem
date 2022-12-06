@@ -128,23 +128,23 @@ void distributed_stream_loader_t::async_process() {
             batch.aug_targets.index_put_({i}, batch.targets[i]);
             batch.aug_weights.index_put_({i}, 1.0);
         }
-        //TODO maybe some batches change from Python
 
         // R will be greater if last batch has a smaller size
         //TODO: could be simplified (indices generation)
         std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
 
         // Iterating over nodes
-        int j = batch_size;
+        std::vector<tl::async_response> responses;
+        std::vector<std::vector<torch::Tensor>> tensors_per_node;
+        int k = batch_size;
         for (const auto& indices : indices_per_node) {
             // How many tensors returned by the current node?
             auto options = torch::TensorOptions().dtype(torch::kFloat32);
-            std::vector<torch::Tensor> tensors(indices.second.size() * num_samples_per_representative, torch::full(representative_shape, -1, options));
-            //TODO: is it contiguous for sure?
-            //TODO: can we see the stderr output from failling asserts? try true == false
-            //TODO check that sizes client/server are matching + check that I'm receiving -2
+            tensors_per_node.emplace_back(std::vector<torch::Tensor>(indices.second.size() * num_samples_per_representative, torch::full(representative_shape, -1, options)));
+            auto tensors = tensors_per_node.back();
             for ([[maybe_unused]] const auto& tensor : tensors)
                 ASSERT(tensor.is_contiguous());
+
             std::vector<std::pair<void*, std::size_t>> segments(indices.second.size() * num_samples_per_representative);
             int i = 0;
             for (auto& rdma_tensor : segments) {
@@ -155,32 +155,23 @@ void distributed_stream_loader_t::async_process() {
 
             tl::provider_handle& ph = provider_handles[indices.first];
             tl::bulk local_bulk = get_engine().expose(segments, tl::bulk_mode::write_only);
-            std::map<int, std::pair<int, int>> metadata = get_samples_procedure.on(ph)(local_bulk, indices.second);
+            responses.emplace_back(get_samples_procedure.on(ph).async(local_bulk, indices.second));
+        }
 
-            //torch::Tensor single = torch::full({3, 224, 224}, -2, options);
-
+        for (int i = 0; i < responses.size(); i++) {
+            std::map<int, std::pair<int, int>> metadata = responses[i].wait();
             // Received RDMA bulk, convert it back to Tensor now :)
-            int t = 0;
             for (auto it = metadata.begin(); it != metadata.end(); it++) {
                 int num_targets = it->second.first;
-                for (int i = 0; i < num_targets; i++) {
-                    //batch.aug_samples.index_put_({j}, single);
-                    //batch.aug_weights.index_put_({j}, it->second.second);
-                    ASSERT(torch::equal(tensors[t], torch::full(representative_shape, -2, options)));
-                    batch.aug_samples.index_put_({j}, tensors[t]);
-                    batch.aug_weights.index_put_({j}, it->second.second);
-                    if (task_type == Classification) {
-                        batch.aug_targets.index_put_({j}, it->first);
-                        t++;
-                    } else {
-                        batch.aug_targets.index_put_({j}, tensors[t + 1]);
-                        t += num_samples_per_representative;
-                    }
-                    j++;
+                for (int j = 0; j < num_targets; j++) {
+                    batch.aug_samples.index_put_({k}, tensors_per_node[i][j]);
+                    batch.aug_weights.index_put_({k}, it->second.second);
+                    batch.aug_targets.index_put_({k}, it->first);
+                    k++;
                 }
             }
         }
-        batch.aug_size = j;
+        batch.aug_size = k;
 
         lock.lock();
         response_queue.emplace_back(batch);
@@ -275,17 +266,6 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     int c = 0;
     rehearsal_map_t samples;
     
-    /*
-    auto options = torch::TensorOptions().dtype(torch::kFloat32);
-    for (auto index : indices) {
-        samples.emplace(c, std::make_pair(0, buffer_t()));
-        representative_t repr;
-        repr.push_back(torch::full({3, 224, 224}, -2, options));
-        samples[c].second.push_back(repr);
-        c++;
-    }
-    */
-
     if (rehearsal_size > 0) {
         for (auto index : indices) {
             size_t rehearsal_class = index / N;
@@ -321,9 +301,6 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         << samples.size() << " different classes to remote node (endpoint: "
         << req.get_endpoint() << ")" << std::endl;
     
-    auto options = torch::TensorOptions().dtype(torch::kFloat32);
-    torch::Tensor single = torch::full(representative_shape, -2, options);
-
     // Fill the RDMA buffer with tensors, ordering them by label
     std::map<int, std::pair<int, int>> metadata;
     std::vector<std::pair<void*, std::size_t>> segments;
@@ -333,21 +310,13 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         auto label = it->first;
         auto weight = it->second.first;
         metadata.insert({label, {reprs.size(), weight}});
+
         for (representative_t repr : reprs) {
             ASSERT(repr.size() == num_samples_per_representative);
-            for (int i = 0; i < num_samples_per_representative; i++) {
-                if (single.nbytes() != 0) {
-                    std::cout << "Writing " << single.data_ptr() << " (" << single.nbytes() << " bytes)" << std::endl;
-                    segments.emplace_back(single.data_ptr(), single.nbytes());
-                }
-            }
-
-            /*
             for (const auto& tensor : repr) {
                 ASSERT(tensor.nbytes() != 0);
                 segments.emplace_back(tensor.data_ptr(), tensor.nbytes());
             }
-            */
         }
     }
     ASSERT(c == segments.size())
