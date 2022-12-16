@@ -122,6 +122,7 @@ void distributed_stream_loader_t::async_process() {
         int R = batch.aug_samples.sizes()[0] - batch_size;
         assert(R > 0 && R + batch_size == batch.aug_targets.sizes()[0]
             && R + batch_size == batch.aug_weights.sizes()[0]);
+        auto nbytes = batch.samples[0].nbytes();
 
         // Initialization of the augmented result
         for (int i = 0; i < batch_size; i++) {
@@ -136,22 +137,15 @@ void distributed_stream_loader_t::async_process() {
 
         // Iterating over nodes
         std::vector<tl::async_response> responses;
-        std::vector<std::vector<torch::Tensor>> tensors_per_node;
         int k = batch_size;
         for (const auto& indices : indices_per_node) {
-            // How many tensors returned by the current node?
-            auto options = torch::TensorOptions().dtype(torch::kFloat32);
-            tensors_per_node.emplace_back(std::vector<torch::Tensor>(indices.second.size() * num_samples_per_representative, torch::full(representative_shape, -1, options)));
-            auto tensors = tensors_per_node.back();
-            for ([[maybe_unused]] const auto& tensor : tensors)
-                ASSERT(tensor.is_contiguous());
-
             std::vector<std::pair<void*, std::size_t>> segments(indices.second.size() * num_samples_per_representative);
-            int i = 0;
-            for (auto& rdma_tensor : segments) {
-                rdma_tensor.first = tensors[i].data_ptr();
-                rdma_tensor.second = tensors[i].nbytes();
-                i++;
+            for (auto& segment : segments) {
+                const auto& tensor = batch.aug_samples;
+                ASSERT(tensor.is_contiguous());
+                segment.first = tensor.data_ptr() + k * nbytes;
+                segment.second = nbytes;
+                k++;
             }
 
             tl::provider_handle& ph = provider_handles[indices.first];
@@ -159,18 +153,20 @@ void distributed_stream_loader_t::async_process() {
             responses.emplace_back(get_samples_procedure.on(ph).async(local_bulk, indices.second));
         }
 
-        for (int i = 0; i < responses.size(); i++) {
+        k = batch_size;
+        int i = 0;
+        for (const auto& indices : indices_per_node) {
             std::map<int, std::pair<int, int>> metadata = responses[i].wait();
-            // Received RDMA bulk, convert it back to Tensor now :)
+            // metadata shape: metadata.insert({label, {reprs.size(), weight}});
             for (auto it = metadata.begin(); it != metadata.end(); it++) {
                 int num_targets = it->second.first;
                 for (int j = 0; j < num_targets; j++) {
-                    batch.aug_samples.index_put_({k}, tensors_per_node[i][j]);
                     batch.aug_weights.index_put_({k}, it->second.second);
                     batch.aug_targets.index_put_({k}, it->first);
                     k++;
                 }
             }
+            i++;
         }
         batch.aug_size = k;
 
