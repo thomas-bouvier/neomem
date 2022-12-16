@@ -304,12 +304,12 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     std::map<int, std::pair<int, int>> metadata;
     std::vector<std::pair<void*, std::size_t>> segments;
     for (auto it = samples.begin(); it != samples.end(); it++) {
-        buffer_t reprs = it->second.second;
+        const buffer_t& reprs = it->second.second;
         auto label = it->first;
         auto weight = it->second.first;
         metadata.insert({label, {reprs.size(), weight}});
 
-        for (representative_t repr : reprs) {
+        for (const representative_t& repr : reprs) {
             ASSERT(repr.size() == num_samples_per_representative);
             for (const torch::Tensor& tensor : repr) {
                 ASSERT(tensor.nbytes() != 0);
