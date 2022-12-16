@@ -43,7 +43,7 @@ class distributed_stream_loader_t : public engine_loader_t, public tl::provider<
     size_t history_count = 0;
     size_t rehearsal_size = 0;
 
-    buffer_t rehearsal_vector;
+    std::vector<torch::Tensor> rehearsal_vector;
     std::vector<size_t> rehearsal_metadata;
     struct queue_item_t {
         int aug_size = 0;

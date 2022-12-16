@@ -46,7 +46,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
 
     define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
-    get_samples_procedure = get_engine().define("get_samples");
+    get_samples_procedure = server_engine.define("get_samples");
 
     // The thread executing the actual client issuing rpcs
     es = tl::xstream::create();
@@ -63,8 +63,9 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
         }
     }
 
-    rehearsal_vector.insert(rehearsal_vector.begin(), K * N, representative_t());
+    rehearsal_vector.insert(rehearsal_vector.begin(), K * N * num_samples_per_representative, torch::zeros(representative_shape));
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, 0);
+    DBG("Distributed buffer memory allocated!");
 }
 
 std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const {
@@ -80,7 +81,7 @@ std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_workers);
 
-    std::map<std::string, int> endpoints = {{get_engine().self(), server_id}};
+    std::map<std::string, int> endpoints = {{server_engine.self(), server_id}};
     auto all_endpoints = gather_dictionary(endpoints, MAX_CF_LENGTH, num_workers, rank);
 
     if (!was_initialized) {
@@ -92,7 +93,7 @@ std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const
 void distributed_stream_loader_t::register_endpoints(const std::map<std::string, int>& endpoints) {
     for (auto endpoint : endpoints) {
         std::cout << "Looking up " << endpoint.first << ", " << endpoint.second << std::endl;
-        tl::endpoint server = get_engine().lookup(endpoint.first);
+        tl::endpoint server = server_engine.lookup(endpoint.first);
         provider_handles.emplace_back(tl::provider_handle(server, endpoint.second));
     }
 }
@@ -154,7 +155,7 @@ void distributed_stream_loader_t::async_process() {
             }
 
             tl::provider_handle& ph = provider_handles[indices.first];
-            tl::bulk local_bulk = get_engine().expose(segments, tl::bulk_mode::write_only);
+            tl::bulk local_bulk = server_engine.expose(segments, tl::bulk_mode::write_only);
             responses.emplace_back(get_samples_procedure.on(ph).async(local_bulk, indices.second));
         }
 
@@ -187,12 +188,12 @@ void distributed_stream_loader_t::async_process() {
  * Selection without replacement from remote nodes + current node
  * get_samples in Python
  */
-std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int effective_representatives) {
+std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int R) {
     const unsigned int max_global_index = provider_handles.size() * K * N;
     std::uniform_int_distribution<unsigned int> dice(0, max_global_index - 1);
-    std::vector<unsigned int> choices(effective_representatives);
+    std::vector<unsigned int> choices(R);
     int i = 0;
-    while (i < effective_representatives) {
+    while (i < R) {
         int random_global_index = dice(rand_gen);
         if (std::find(choices.begin(), choices.end(), random_global_index) != choices.end())
             continue;
@@ -224,13 +225,6 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         int label = 0;
         if (task_type == Classification)
             label = batch.targets[i].item<int>();
-        representative_t repr;
-        repr.push_back(batch.samples.index({i}));
-        if (task_type == Reconstruction)
-            repr.push_back(batch.targets.index({i}));
-        ASSERT(repr.size() == num_samples_per_representative);
-        for (const auto& tensor : repr)
-            ASSERT(tensor.nbytes() != 0);
 
         std::unique_lock<tl::mutex> lock(rehearsal_mutex);
         int index = -1;
@@ -240,7 +234,12 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
             index = dice(rand_gen);
         // The random replacement strategy does nothing sometimes
         if (index < N) {
-            rehearsal_vector[N * label + index] = repr;
+            for (int r = 0; r < num_samples_per_representative; r++) {
+                //TODO reconstruction
+                auto tensor = batch.samples.index({i});
+                ASSERT(tensor.nbytes() != 0);
+                rehearsal_vector[N * label + index + r] = tensor;
+            }
             if (index >= rehearsal_metadata[label]) {
                 rehearsal_size++;
                 rehearsal_metadata[label]++;
@@ -280,19 +279,19 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
                     break;
             }
             size_t rehearsal_class_index = (index % N) % rehearsal_metadata[i];
-            representative_t repr = rehearsal_vector[i * N + rehearsal_class_index];
-
-            ASSERT(repr.size() == num_samples_per_representative);
-            for (auto& tensor : repr) {
-                tensor = tensor.to(torch::kCPU).contiguous();
-                ASSERT(tensor.nbytes() != 0);
+            
+            representative_t repr;
+            for (int r = 0; r < num_samples_per_representative; r++) {
+                auto tensor = rehearsal_vector[i * N + rehearsal_class_index + r];
+                ASSERT(!torch::equal(tensor, torch::zeros(representative_shape)))
+                repr.emplace_back(tensor);
             }
 
             auto label = i;
             auto weight = 0;
             if (samples.find(label) == samples.end())
                 samples.emplace(label, std::make_pair(weight, buffer_t()));
-            samples[label].second.push_back(repr);
+            samples[label].second.emplace_back(repr);
             c++;
         }
     }
@@ -300,11 +299,10 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     std::cout << "Sending " << c << "/" << indices.size()  << " representatives from "
         << samples.size() << " different classes to remote node (endpoint: "
         << req.get_endpoint() << ")" << std::endl;
-    
+
     // Fill the RDMA buffer with tensors, ordering them by label
     std::map<int, std::pair<int, int>> metadata;
     std::vector<std::pair<void*, std::size_t>> segments;
-    segments.reserve(indices.size() * num_samples_per_representative);
     for (auto it = samples.begin(); it != samples.end(); it++) {
         buffer_t reprs = it->second.second;
         auto label = it->first;
@@ -313,8 +311,9 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
 
         for (representative_t repr : reprs) {
             ASSERT(repr.size() == num_samples_per_representative);
-            for (const auto& tensor : repr) {
+            for (const torch::Tensor& tensor : repr) {
                 ASSERT(tensor.nbytes() != 0);
+                ASSERT(tensor.is_contiguous());
                 segments.emplace_back(tensor.data_ptr(), tensor.nbytes());
             }
         }
