@@ -1,21 +1,28 @@
 MAIN=rehearsal
-SOURCES=rehearsal.cpp stream_loader.cpp distributed_stream_loader.cpp
-FLAGS=-O3 -Wall -std=c++17 -fPIC -D_GLIBCXX_USE_CXX11_ABI=0 -D__ASSERT 
 
-TORCH_ROOT?=$(HOME)/.conda/envs/horovod-py39/lib/python3.9/site-packages/torch
+TORCH_ROOT?=/opt/view/lib/python3.10/site-packages/torch
+
+PYTHON_INCLUDE=$(shell python -m pybind11 --includes)
 TORCH_INCLUDE=-I$(TORCH_ROOT)/include -I$(TORCH_ROOT)/include/torch/csrc/api/include
+MPI_INCLUDE=$(shell pkg-config --cflags-only-I ompi)
+THALLIUM_INCLUDE=$(shell pkg-config --cflags-only-I thallium)
 
-THALLIUM_INCLUDE?=$(shell pkg-config --cflags-only-I thallium)
+PYTHON_LIBS?=$(shell python3-config --ldflags --embed)
+TORCH_LIBS?=-L$(TORCH_ROOT)/lib
+MPI_LIBS?=$(shell pkg-config --libs ompi)
 THALLIUM_LIBS?=$(shell pkg-config --libs thallium)
+CUDA_LIBS?=-L/opt/view/lib64
 
-INCLUDES=$(shell python -m pybind11 --includes) $(TORCH_INCLUDE) $(THALLIUM_INCLUDE) $(shell python3-config --cflags --embed)
-LIBS=-L$(TORCH_ROOT)/lib -ltorch $(THALLIUM_LIBS) $(shell python3-config --ldflags --embed) -lc10 -ltorch_cpu -ltorch_python
+INCLUDES=$(PYTHON_INCLUDE) $(TORCH_INCLUDE) $(MPI_INCLUDE) $(THALLIUM_INCLUDE) $(shell python3-config --cflags --embed)
+LIBS=$(PYTHON_LIBS) $(TORCH_LIBS) $(MPI_LIBS) $(THALLIUM_LIBS) $(CUDA_LIBS) -lc10 -lc10_cuda -ltorch -ltorch_cpu -ltorch_cuda -ltorch_python -lmpi -lcudart
 EXT=$(shell python3-config --extension-suffix)
-CC=mpic++
+
+CC=g++
+FLAGS=-O3 -Wall -std=c++17 -fPIC
 
 all:
-	$(CC) -shared $(FLAGS) $(INCLUDES) $(SOURCES) -o $(MAIN)$(EXT) $(LIBS)
+	$(CC) -shared $(FLAGS) $(INCLUDES) rehearsal.cpp stream_loader.cpp distributed_stream_loader.cpp -o $(MAIN)$(EXT) $(LIBS)
 test:
 	$(CC) -g $(FLAGS) $(INCLUDES) distributed_stream_loader.cpp main.cpp -o $(MAIN) $(LIBS)
 clean:
-	rm -rf $(MAIN)*.so *~
+	rm -rf $(MAIN) $(MAIN)*.so *~
