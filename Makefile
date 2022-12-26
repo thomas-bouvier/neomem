@@ -17,8 +17,9 @@ INCLUDES=$(PYTHON_INCLUDE) $(TORCH_INCLUDE) $(MPI_INCLUDE) $(THALLIUM_INCLUDE) $
 LIBS=$(PYTHON_LIBS) $(TORCH_LIBS) $(MPI_LIBS) $(THALLIUM_LIBS) $(CUDA_LIBS) -lc10 -lc10_cuda -ltorch -ltorch_cpu -ltorch_cuda -ltorch_python -lmpi -lcudart
 EXT=$(shell python3-config --extension-suffix)
 
+WITH_ABI := $(shell python -c 'import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')
 CC=g++
-FLAGS=-O3 -Wall -std=c++17 -fPIC
+FLAGS=-O3 -Wall -std=c++17 -fPIC -Wl,--no-as-needed -D_GLIBCXX_USE_CXX11_ABI=$(WITH_ABI)
 
 all:
 	$(CC) -shared $(FLAGS) $(INCLUDES) rehearsal.cpp stream_loader.cpp distributed_stream_loader.cpp -o $(MAIN)$(EXT) $(LIBS)
