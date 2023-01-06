@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
         std::cin.clear();
     }
 
-    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 2, {3, 224, 224}, false);
+    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 1, {3, 224, 224}, false);
     std::cout << "size " << endpoints.size() << std::endl;
     for (auto endpoint : endpoints) {
         std::cout << "Checking " << endpoint.first << ", " << endpoint.second << std::endl;
