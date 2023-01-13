@@ -137,9 +137,10 @@ void distributed_stream_loader_t::async_process() {
 
         // Iterating over nodes
         std::vector<tl::async_response> responses;
+        std::vector<std::vector<std::pair<void*, std::size_t>>> all_segments;
         int k = batch_size;
         for (const auto& indices : indices_per_node) {
-            std::vector<std::pair<void*, std::size_t>> segments(indices.second.size() * num_samples_per_representative);
+            auto& segments = all_segments.emplace_back(indices.second.size() * num_samples_per_representative);
             for (auto& segment : segments) {
                 const auto& tensor = batch.aug_samples;
                 ASSERT(tensor.is_contiguous());
@@ -333,7 +334,8 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
         request_cond.wait(lock);
-    request_queue.emplace_back(queue_item_t(samples, targets, aug_samples, aug_targets, aug_weights));
+    request_queue.emplace_back(queue_item_t(samples.to(torch::kCPU), targets.to(torch::kCPU),
+            aug_samples, aug_targets, aug_weights));
     lock.unlock();
     request_cond.notify_one();
 }
