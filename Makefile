@@ -1,24 +1,29 @@
 MAIN=rehearsal
 
-TORCH_ROOT?=/opt/view/lib/python3.10/site-packages/torch
+SPACK_VIEW?=/mnt/view
+TORCH_ROOT?=$(SPACK_VIEW)/lib/python3.10/site-packages/torch
 
 PYTHON_INCLUDE=$(shell python -m pybind11 --includes)
 TORCH_INCLUDE=-I$(TORCH_ROOT)/include -I$(TORCH_ROOT)/include/torch/csrc/api/include
 MPI_INCLUDE=$(shell pkg-config --cflags-only-I ompi)
 THALLIUM_INCLUDE=$(shell pkg-config --cflags-only-I thallium)
+CUDA_INCLUDE=-I$(SPACK_VIEW)/include
 
 PYTHON_LIBS?=$(shell python3-config --ldflags --embed)
 TORCH_LIBS?=-L$(TORCH_ROOT)/lib
 MPI_LIBS?=$(shell pkg-config --libs ompi)
 THALLIUM_LIBS?=$(shell pkg-config --libs thallium)
-CUDA_LIBS?=-L/opt/view/lib64
+CUDA_LIBS?=-L$(SPACK_VIEW)/lib64
 
-INCLUDES=$(PYTHON_INCLUDE) $(TORCH_INCLUDE) $(MPI_INCLUDE) $(THALLIUM_INCLUDE) $(shell python3-config --cflags --embed)
-LIBS=$(PYTHON_LIBS) $(TORCH_LIBS) $(MPI_LIBS) $(THALLIUM_LIBS) $(CUDA_LIBS) -lc10 -lc10_cuda -ltorch -ltorch_cpu -ltorch_cuda -ltorch_python -lmpi -lcudart
+INCLUDES=$(PYTHON_INCLUDE) $(TORCH_INCLUDE) $(MPI_INCLUDE) $(THALLIUM_INCLUDE) $(CUDA_INCLUDE) $(shell python3-config --cflags --embed)
+LIBS=$(PYTHON_LIBS) $(TORCH_LIBS) $(MPI_LIBS) $(THALLIUM_LIBS) $(CUDA_LIBS) -lc10 -lc10_cuda -ltorch -ltorch_cpu -ltorch_cuda -ltorch_python -lmpi -lcudart -lnl-3
 EXT=$(shell python3-config --extension-suffix)
 
+
+# https://github.com/chrischoy/MakePytorchPlusPlus
 WITH_ABI := $(shell python -c 'import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')
 CC=g++
+# https://github.com/pytorch/pytorch/issues/36437
 FLAGS=-O3 -Wall -std=c++17 -fPIC -Wl,--no-as-needed -D_GLIBCXX_USE_CXX11_ABI=$(WITH_ABI)
 
 all:
