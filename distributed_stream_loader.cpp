@@ -6,11 +6,13 @@
 #include <thallium/serialization/stl/unordered_map.hpp>
 #include <thallium/serialization/stl/pair.hpp>
 #include <thallium/serialization/stl/vector.hpp>
+#include <cuda_runtime.h>
 #include <cereal/types/string.hpp>
 
 #include "mpi_utils.hpp"
 
 #define __DEBUG
+#define __ASSERT
 #include "debug.hpp"
 
 using namespace torch::indexing;
@@ -20,7 +22,7 @@ engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_i
     server_engine(address, THALLIUM_SERVER_MODE, true, POOL_SIZE) {
     std::cout << "Server running at address " << server_engine.self()
                 << " with provider id " << provider_id << std::endl;
-}            
+}
 
 engine_loader_t::~engine_loader_t() {
     server_engine.wait_for_finalize();
@@ -38,11 +40,11 @@ engine_loader_t::~engine_loader_t() {
 distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C,
     int64_t seed, uint16_t _server_id, const std::string& server_address,
     unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
-    bool discover_endpoints)
+    bool _cuda_rdma, bool discover_endpoints)
         : engine_loader_t(server_address, _server_id), tl::provider<distributed_stream_loader_t>(server_engine, _server_id),
         task_type(_task_type), K(_K), N(_N), C(_C), rand_gen(seed),
         num_samples_per_representative(_num_samples_per_representative),
-        representative_shape(_representative_shape) { 
+        representative_shape(_representative_shape), cuda_rdma(_cuda_rdma) {
 
     define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
@@ -135,16 +137,29 @@ void distributed_stream_loader_t::async_process() {
         //TODO: could be simplified (indices generation)
         std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
 
-        // Iterating over nodes
+        int k;
+        torch::Tensor* buffer;
+        bool use_cpu_buffer = !cuda_rdma && batch.aug_samples.device().type() == torch::kCUDA;
+        if (use_cpu_buffer) {
+            // Use a temporary CPU buffer that will be copied to CUDA later
+            auto shape = representative_shape;
+            shape.insert(shape.begin(), R);
+            buffer = new torch::Tensor(torch::zeros(shape));
+            k = 0;
+        } else {
+            buffer = &batch.aug_samples;
+            k = batch_size;
+        }
+
+        // Iterate over nodes
         std::vector<tl::async_response> responses;
         std::vector<std::vector<std::pair<void*, std::size_t>>> all_segments;
-        int k = batch_size;
         for (const auto& indices : indices_per_node) {
             auto& segments = all_segments.emplace_back(indices.second.size() * num_samples_per_representative);
+            // Each segment maps to an individual tensor
             for (auto& segment : segments) {
-                const auto& tensor = batch.aug_samples;
-                ASSERT(tensor.is_contiguous());
-                segment.first = tensor.data_ptr() + k * nbytes;
+                ASSERT(buffer->is_contiguous());
+                segment.first = (char *) buffer->data_ptr() + k * nbytes;
                 segment.second = nbytes;
                 k++;
             }
@@ -171,13 +186,23 @@ void distributed_stream_loader_t::async_process() {
         }
         batch.aug_size = k;
 
+        if (use_cpu_buffer) {
+            ASSERT(k - batch_size <= R);
+            ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
+                              buffer->data_ptr(),
+                              (k - batch_size) * nbytes, 
+                              cudaMemcpyHostToDevice
+            ) == cudaSuccess);
+            free(buffer);
+        }
+
         lock.lock();
         response_queue.emplace_back(batch);
         lock.unlock();
         request_cond.notify_one();
 
         populate_rehearsal_buffer(batch, batch_size);
-        //update_representative_weights(R, batch_size);
+        update_representative_weights(R, batch_size);
     }
 }
 

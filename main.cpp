@@ -38,41 +38,29 @@ int main(int argc, char** argv) {
         std::cin.clear();
     }
 
-    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 1, {3, 224, 224}, false);
-    std::cout << "size " << endpoints.size() << std::endl;
+    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 1, {3, 224, 224}, false, false);
     for (auto endpoint : endpoints) {
         std::cout << "Checking " << endpoint.first << ", " << endpoint.second << std::endl;
     }
     dsl.register_endpoints(endpoints);
 
-    torch::Tensor aug_samples = torch::zeros({N + R, 3, 224, 224});
-    torch::Tensor aug_labels = torch::randint(K, {N + R});
-    torch::Tensor aug_weights = torch::zeros({N + R});
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    torch::Tensor aug_samples = torch::zeros({N + R, 3, 224, 224}, options);
+    torch::Tensor aug_labels = torch::randint(K, {N + R}, options);
+    torch::Tensor aug_weights = torch::zeros({N + R}, options);
 
     auto random_batch = [server_id]() -> std::tuple<torch::Tensor, torch::Tensor> {
-        auto options = torch::TensorOptions().dtype(torch::kFloat32);
+        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
         torch::Tensor labels = torch::randint(K, {N});
         torch::Tensor samples = torch::full({N, 3, 224, 224}, server_id, options);
         return std::make_tuple<>(samples, labels);
     };
 
-    std::cout << "Round 1" << std::endl;
-    auto batch = random_batch();
-    dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
-    int size = dsl.wait();
-    std::cout << "Received " << size - N << std::endl;
-
-    std::cout << "Round 2" << std::endl;
-    batch = random_batch();
-    dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
-    size = dsl.wait();
-    std::cout << "Received " << size - N << std::endl;
-
-    for (int i = 3; i < 1000; i++) {
+    for (int i = 0; i < 1000; i++) {
         std::cout << "Round " << i << std::endl;
-        batch = random_batch();
+        auto batch = random_batch();
         dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
-        size = dsl.wait();
+        int size = dsl.wait();
         std::cout << "Received " << size - N << std::endl;
     }
 
