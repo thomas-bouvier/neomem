@@ -17,7 +17,7 @@
 
 using namespace torch::indexing;
 
-
+//TODO: constructor with device registration
 engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_id) :
     server_engine(address, THALLIUM_SERVER_MODE, true, POOL_SIZE) {
     std::cout << "Server running at address " << server_engine.self()

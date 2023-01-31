@@ -20,13 +20,13 @@ PYBIND11_MODULE(rehearsal, m) {
     */
 
     py::class_<distributed_stream_loader_t>(m, "DistributedStreamLoader")
-        .def(py::init<Task, unsigned int, unsigned int, unsigned int, int64_t, uint16_t, std::string, unsigned int, std::vector<long>, bool>(), py::call_guard<py::scoped_ostream_redirect>())
+        .def(py::init<Task, unsigned int, unsigned int, unsigned int, int64_t, uint16_t, std::string, unsigned int, std::vector<long>, bool, bool>(), py::call_guard<py::scoped_ostream_redirect>())
         .def("register_endpoints", &distributed_stream_loader_t::register_endpoints)
         .def("accumulate", &distributed_stream_loader_t::accumulate, py::call_guard<py::gil_scoped_release>())
         .def("wait", &distributed_stream_loader_t::wait, py::call_guard<py::gil_scoped_release>())
         .def("get_rehearsal_size", &distributed_stream_loader_t::get_rehearsal_size)
         .def("get_history_count", &distributed_stream_loader_t::get_history_count);
-    
+
     py::enum_<Task>(m, "Task")
         .value("Classification", Classification)
         .value("Reconstruction", Reconstruction)
