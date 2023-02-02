@@ -40,11 +40,12 @@ engine_loader_t::~engine_loader_t() {
 distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C,
     int64_t seed, uint16_t _server_id, const std::string& server_address,
     unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
-    bool _cuda_rdma, bool discover_endpoints)
+    bool _cuda_rdma, bool discover_endpoints, bool _verbose)
         : engine_loader_t(server_address, _server_id), tl::provider<distributed_stream_loader_t>(server_engine, _server_id),
         task_type(_task_type), K(_K), N(_N), C(_C), rand_gen(seed),
         num_samples_per_representative(_num_samples_per_representative),
-        representative_shape(_representative_shape), cuda_rdma(_cuda_rdma) {
+        representative_shape(_representative_shape), cuda_rdma(_cuda_rdma),
+        verbose(_verbose) {
 
     define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
@@ -318,9 +319,11 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         }
     }
 
-    std::cout << "Sending " << c << "/" << indices.size()  << " representatives from "
-        << samples.size() << " different classes to remote node (endpoint: "
-        << req.get_endpoint() << ")" << std::endl;
+    if (verbose) {
+        std::cout << "Sending " << c << "/" << indices.size()  << " representatives from "
+            << samples.size() << " different classes to remote node (endpoint: "
+            << req.get_endpoint() << ")" << std::endl;
+    }
 
     // Fill the RDMA buffer with tensors, ordering them by label
     std::map<int, std::pair<int, int>> metadata;

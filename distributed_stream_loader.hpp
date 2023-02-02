@@ -39,6 +39,8 @@ class distributed_stream_loader_t : public engine_loader_t, public tl::provider<
     std::vector<long> representative_shape;
     bool cuda_rdma;
 
+    bool verbose;
+
     rehearsal_map_t rehearsal_map;
     rehearsal_counts_t counts;
     size_t history_count = 0;
@@ -76,8 +78,9 @@ class distributed_stream_loader_t : public engine_loader_t, public tl::provider<
 public:
     distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
         uint16_t server_id, const std::string& server_address,
-        unsigned int _num_samples_per_representative,
-        std::vector<long> _representative_shape, bool _cuda_rdma, bool discover_endpoints = false);
+        unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
+        bool _cuda_rdma, bool discover_endpoints = false,
+        bool _verbose = false);
     ~distributed_stream_loader_t();
 
     void register_endpoints(const std::map<std::string, int>& endpoints);
