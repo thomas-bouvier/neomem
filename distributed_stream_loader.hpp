@@ -56,6 +56,7 @@ class distributed_stream_loader_t : public engine_loader_t, public tl::provider<
             samples(_samples), targets(_targets), aug_samples(_aug_samples), aug_targets(_aug_targets), aug_weights(_aug_weights) { }
         queue_item_t() { }
     };
+
     std::deque<queue_item_t> request_queue, response_queue;
     tl::mutex request_mutex;
     tl::condition_variable request_cond;

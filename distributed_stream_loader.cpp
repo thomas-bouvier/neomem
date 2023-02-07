@@ -29,10 +29,10 @@ engine_loader_t::~engine_loader_t() {
 }
 
 /**
- * 1- This constructor initializes the provider. This class is both a server and
- * a client. There are n clients and n servers. Each client can get data from
- * the n servers. (n x n relation).
- * 
+ * This constructor initializes the provider. This class is both a server and a 
+ * client. There are n clients and n servers. Each client can get data from the
+ * n servers. (n x n relation).
+ *
  * A client holds some data in a "rehearsal buffer". A client updates the
  * content of its rehearsal buffer by sampling from the n other rehearsal
  * buffers.
@@ -102,10 +102,9 @@ void distributed_stream_loader_t::register_endpoints(const std::map<std::string,
 }
 
 /**
- * 4- This is the client async thread. This method consumes the data pushed into
- * the request_queue by accumulate(), processes it, samples data from all other
- * servers, and push the new data into the response_queue (which will be
- * consumed in turn by wait()).
+ * This method consumes the data pushed into the request_queue by accumulate(),
+ * processes it, samples data from all other servers, and push the new data into
+ * the response_queue (which will be consumed in turn by wait()).
  */
 void distributed_stream_loader_t::async_process() {
     while (true) {
@@ -194,7 +193,7 @@ void distributed_stream_loader_t::async_process() {
                               (k - batch_size) * nbytes, 
                               cudaMemcpyHostToDevice
             ) == cudaSuccess);
-            free(buffer);
+            delete buffer;
         }
 
         lock.lock();
@@ -259,9 +258,11 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         if (index < N) {
             for (int r = 0; r < num_samples_per_representative; r++) {
                 //TODO reconstruction
-                auto tensor = batch.samples.index({i});
+                torch::Tensor tensor = batch.samples.index({i});
                 ASSERT(tensor.nbytes() != 0);
-                rehearsal_vector[N * label + index + r] = tensor;
+                auto j = N * label + index + r;
+                ASSERT(j < K * N * num_samples_per_representative);
+                rehearsal_vector[j] = tensor;
             }
             if (index >= rehearsal_metadata[label]) {
                 rehearsal_size++;
@@ -287,7 +288,7 @@ void distributed_stream_loader_t::update_representative_weights(int effective_re
 void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) {
     int c = 0;
     rehearsal_map_t samples;
-    
+
     if (rehearsal_size > 0) {
         for (auto index : indices) {
             size_t rehearsal_class = index / N;
@@ -302,7 +303,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
                     break;
             }
             size_t rehearsal_class_index = (index % N) % rehearsal_metadata[i];
-            
+
             representative_t repr;
             for (int r = 0; r < num_samples_per_representative; r++) {
                 auto tensor = rehearsal_vector[i * N + rehearsal_class_index + r];
@@ -353,9 +354,9 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
 }
 
 /**
- * 2- This is called from Python in a synchronous fashion. We push the incoming
- * data to the request_queue, to be consumed by the client thread in an
- * asynchronous fashion. Nothing fancy here.
+ * This is called from Python in a synchronous fashion. We push the incoming
+ * data to the request_queue for it to be consumed by the client thread in an
+ * asynchronous fashion.
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
                  const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
@@ -369,7 +370,7 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
 }
 
 /**
- * 3- This is also called from Python in a synchronous fashion. We consume the
+ * This is called from Python in a synchronous fashion. We consume the
  * data processed by the client thread. If no data is ready, we just wait,
  * blocking the Python thread.
  */
