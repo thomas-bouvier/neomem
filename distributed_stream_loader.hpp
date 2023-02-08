@@ -15,7 +15,6 @@ enum Task { Classification, Reconstruction };
 typedef std::vector<torch::Tensor> representative_t;
 typedef std::vector<representative_t> buffer_t;
 typedef std::unordered_map<int, std::pair<double, buffer_t>> rehearsal_map_t;
-typedef std::unordered_map<int, int> rehearsal_counts_t;
 
 class engine_loader_t {
     static const unsigned int POOL_SIZE = 4;
@@ -37,17 +36,13 @@ class distributed_stream_loader_t : public engine_loader_t, public tl::provider<
     std::default_random_engine rand_gen;
     unsigned int num_samples_per_representative;
     std::vector<long> representative_shape;
-    bool cuda_rdma;
+    bool cuda_rdma, verbose;
 
-    bool verbose;
-
-    rehearsal_map_t rehearsal_map;
-    rehearsal_counts_t counts;
+    std::vector<torch::Tensor> rehearsal_vector;
+    std::vector<std::pair<size_t, double>> rehearsal_metadata;
     size_t history_count = 0;
     size_t rehearsal_size = 0;
 
-    std::vector<torch::Tensor> rehearsal_vector;
-    std::vector<size_t> rehearsal_metadata;
     struct queue_item_t {
         int aug_size = 0;
         torch::Tensor samples, targets, aug_samples, aug_targets, aug_weights;

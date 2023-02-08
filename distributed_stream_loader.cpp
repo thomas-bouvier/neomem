@@ -67,7 +67,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsign
     }
 
     rehearsal_vector.insert(rehearsal_vector.begin(), K * N * num_samples_per_representative, torch::zeros(representative_shape));
-    rehearsal_metadata.insert(rehearsal_metadata.begin(), K, 0);
+    rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 0.0));
     DBG("Distributed buffer memory allocated!");
 }
 
@@ -172,13 +172,13 @@ void distributed_stream_loader_t::async_process() {
         k = batch_size;
         int i = 0;
         for (const auto& indices : indices_per_node) {
-            std::map<int, std::pair<int, int>> metadata = responses[i].wait();
+            std::map<int, std::pair<double, std::size_t>> metadata = responses[i].wait();
             // metadata shape: metadata.insert({label, {reprs.size(), weight}});
             for (auto it = metadata.begin(); it != metadata.end(); it++) {
-                int num_targets = it->second.first;
+                const int num_targets = it->second.second;
                 for (int j = 0; j < num_targets; j++) {
-                    batch.aug_weights.index_put_({k}, it->second.second);
                     batch.aug_targets.index_put_({k}, it->first);
+                    batch.aug_weights.index_put_({k}, it->second.first);
                     k++;
                 }
             }
@@ -250,8 +250,8 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 
         std::unique_lock<tl::mutex> lock(rehearsal_mutex);
         int index = -1;
-        if (rehearsal_metadata[label] < N)
-            index = rehearsal_metadata[label];
+        if (rehearsal_metadata[label].first < N)
+            index = rehearsal_metadata[label].first;
         else
             index = dice(rand_gen);
         // The random replacement strategy does nothing sometimes
@@ -264,9 +264,9 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
                 ASSERT(j < K * N * num_samples_per_representative);
                 rehearsal_vector[j] = tensor;
             }
-            if (index >= rehearsal_metadata[label]) {
+            if (index >= rehearsal_metadata[label].first) {
                 rehearsal_size++;
-                rehearsal_metadata[label]++;
+                rehearsal_metadata[label].first++;
             }
             history_count++;
         }
@@ -275,8 +275,8 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 
 void distributed_stream_loader_t::update_representative_weights(int effective_representatives, int batch_size) {
     double weight = (double) batch_size / (double) (effective_representatives * rehearsal_size);
-    for (auto& map_it : rehearsal_map) {
-        map_it.second.first = std::max(std::log(counts[map_it.first] * weight), 1.0);
+    for (auto &pair : rehearsal_metadata) {
+        pair.second = std::max(std::log(pair.first * weight), 1.0);
     }
 }
 
@@ -292,17 +292,19 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     if (rehearsal_size > 0) {
         for (auto index : indices) {
             size_t rehearsal_class = index / N;
-            int zeros = std::count(rehearsal_metadata.begin(), rehearsal_metadata.end(), 0);
+            const int zeros = std::count_if(rehearsal_metadata.begin(), rehearsal_metadata.end(),
+                [](const auto &p) { return p.first == 0; }
+            );
             rehearsal_class %= (rehearsal_metadata.size() - zeros);
             int j = -1, i = 0;
             for (; i < rehearsal_metadata.size(); i++) {
-                if (rehearsal_metadata[i] == 0)
+                if (rehearsal_metadata[i].first == 0)
                     continue;
                 j++;
                 if (j == rehearsal_class)
                     break;
             }
-            size_t rehearsal_class_index = (index % N) % rehearsal_metadata[i];
+            size_t rehearsal_class_index = (index % N) % rehearsal_metadata[i].first;
 
             representative_t repr;
             for (int r = 0; r < num_samples_per_representative; r++) {
@@ -311,11 +313,9 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
                 repr.emplace_back(tensor);
             }
 
-            auto label = i;
-            auto weight = 0;
-            if (samples.find(label) == samples.end())
-                samples.emplace(label, std::make_pair(weight, buffer_t()));
-            samples[label].second.emplace_back(repr);
+            auto weight = rehearsal_metadata[i].second;
+            samples[i].first = weight;
+            samples[i].second.emplace_back(repr);
             c++;
         }
     }
@@ -327,13 +327,13 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     }
 
     // Fill the RDMA buffer with tensors, ordering them by label
-    std::map<int, std::pair<int, int>> metadata;
+    std::map<int, std::pair<double, std::size_t>> metadata;
     std::vector<std::pair<void*, std::size_t>> segments;
     for (auto it = samples.begin(); it != samples.end(); it++) {
-        const buffer_t& reprs = it->second.second;
         auto label = it->first;
         auto weight = it->second.first;
-        metadata.insert({label, {reprs.size(), weight}});
+        const buffer_t& reprs = it->second.second;
+        metadata.insert({label, {weight, reprs.size()}});
 
         for (const representative_t& repr : reprs) {
             ASSERT(repr.size() == num_samples_per_representative);
