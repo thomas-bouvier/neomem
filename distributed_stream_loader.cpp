@@ -258,7 +258,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         if (index < N) {
             for (int r = 0; r < num_samples_per_representative; r++) {
                 //TODO reconstruction
-                torch::Tensor tensor = batch.samples.index({i});
+                torch::Tensor tensor = batch.samples.index({i}).detach().clone();
                 ASSERT(tensor.nbytes() != 0);
                 auto j = N * label + index + r;
                 ASSERT(j < K * N * num_samples_per_representative);
