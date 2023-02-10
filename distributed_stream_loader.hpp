@@ -13,8 +13,8 @@ namespace tl = thallium;
 enum Task { Classification, Reconstruction };
 
 typedef std::vector<torch::Tensor> representative_t;
-typedef std::vector<representative_t> buffer_t;
-typedef std::unordered_map<int, std::pair<double, buffer_t>> rehearsal_map_t;
+typedef std::vector<representative_t> representative_collection_t;
+typedef std::unordered_map<int, std::pair<double, representative_collection_t>> rehearsal_map_t;
 
 class engine_loader_t {
     static const unsigned int POOL_SIZE = 4;

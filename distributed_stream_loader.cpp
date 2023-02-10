@@ -1,10 +1,9 @@
 #include "distributed_stream_loader.hpp"
 
-#include <unordered_set>
+#include <tuple>
 #include <assert.h>
 
-#include <thallium/serialization/stl/unordered_map.hpp>
-#include <thallium/serialization/stl/pair.hpp>
+#include <thallium/serialization/stl/tuple.hpp>
 #include <thallium/serialization/stl/vector.hpp>
 #include <cuda_runtime.h>
 #include <cereal/types/string.hpp>
@@ -172,13 +171,15 @@ void distributed_stream_loader_t::async_process() {
         k = batch_size;
         int i = 0;
         for (const auto& indices : indices_per_node) {
-            std::map<int, std::pair<double, std::size_t>> metadata = responses[i].wait();
-            // metadata shape: metadata.insert({label, {reprs.size(), weight}});
-            for (auto it = metadata.begin(); it != metadata.end(); it++) {
-                const int num_targets = it->second.second;
+            std::vector<std::tuple<int, double, std::size_t>> metadata = responses[i].wait();
+            for (const auto &it : metadata) {
+                int label;
+                double weight;
+                std::size_t num_targets;
+                std::tie(label, weight, num_targets) = it;
                 for (int j = 0; j < num_targets; j++) {
-                    batch.aug_targets.index_put_({k}, it->first);
-                    batch.aug_weights.index_put_({k}, it->second.first);
+                    batch.aug_targets.index_put_({k}, label);
+                    batch.aug_weights.index_put_({k}, weight);
                     k++;
                 }
             }
@@ -195,6 +196,18 @@ void distributed_stream_loader_t::async_process() {
             ) == cudaSuccess);
             delete buffer;
         }
+
+        /*
+        TEST:
+        for (int i = 0; i < batch.aug_size; i++) {
+            if (batch.aug_targets[i].item().toInt() != batch.aug_samples[i][0][0][0].item().toInt()) {
+                std::cout << "fail it " << i << std::endl;
+                std::cout << "label " << batch.aug_targets[i].item().toInt() << std::endl;
+                std::cout << "value " << batch.aug_samples[i][0][0][0].item().toInt() << std::endl;
+                ASSERT(false);
+            }
+        }
+        */
 
         lock.lock();
         response_queue.emplace_back(batch);
@@ -289,27 +302,42 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     int c = 0;
     rehearsal_map_t samples;
 
+    /**
+    * Input
+    * Vector of indices
+    *
+    * Output
+    * Rehearsal buffer, unordered map indexed by labels
+    * - (label1, (weight, reprs))
+    * - (label2, (weight, reprs))
+    * If a representative is already present for a label, the representative is
+    * appended to reprs.
+    **/
     if (rehearsal_size > 0) {
         for (auto index : indices) {
-            size_t rehearsal_class = index / N;
-            const int zeros = std::count_if(rehearsal_metadata.begin(), rehearsal_metadata.end(),
+            size_t rehearsal_class_index = index / N;
+            const int num_zeros = std::count_if(rehearsal_metadata.begin(), rehearsal_metadata.end(),
                 [](const auto &p) { return p.first == 0; }
             );
-            rehearsal_class %= (rehearsal_metadata.size() - zeros);
+            rehearsal_class_index %= (rehearsal_metadata.size() - num_zeros);
+
             int j = -1, i = 0;
             for (; i < rehearsal_metadata.size(); i++) {
                 if (rehearsal_metadata[i].first == 0)
                     continue;
                 j++;
-                if (j == rehearsal_class)
+                if (j == rehearsal_class_index)
                     break;
             }
-            size_t rehearsal_class_index = (index % N) % rehearsal_metadata[i].first;
 
+            const size_t rehearsal_repr_of_class_index = (index % N) % rehearsal_metadata[i].first;
             representative_t repr;
             for (int r = 0; r < num_samples_per_representative; r++) {
-                auto tensor = rehearsal_vector[i * N + rehearsal_class_index + r];
-                ASSERT(!torch::equal(tensor, torch::zeros(representative_shape)))
+                auto tensor = rehearsal_vector[i * N + rehearsal_repr_of_class_index + r];
+                /*
+                TEST:
+                ASSERT(tensor[0][0][0].item().toInt() == i);
+                */
                 repr.emplace_back(tensor);
             }
 
@@ -326,25 +354,64 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             << req.get_endpoint() << ")" << std::endl;
     }
 
-    // Fill the RDMA buffer with tensors, ordering them by label
-    std::map<int, std::pair<double, std::size_t>> metadata;
+    /**
+    * Fill the RDMA buffer with tensors
+    *
+    * Input
+    * Rehearsal buffer, unordered map indexed by labels
+    * - (label1, (weight, reprs))
+    * - (label2, (weight, reprs))
+    *
+    *
+    * Output
+    * Metadata, vector (to preserve the order) of tuples
+    * - {(label1, weight, num_reprs), (label2, weight, num_reprs)}
+    * Segments
+    * - {(ptrrepA, nbytesA) (ptrrepB, nbytesB) (ptrrepC, nbytesC) (ptrrepD, nbytesD)}
+    *
+    * repA and repB are of label1, repC and repD are of label2
+    * TODO: complete this comment to explain how representatives are expanded
+    **/
+    std::vector<std::tuple<int, double, std::size_t>> metadata;
     std::vector<std::pair<void*, std::size_t>> segments;
-    for (auto it = samples.begin(); it != samples.end(); it++) {
-        auto label = it->first;
-        auto weight = it->second.first;
-        const buffer_t& reprs = it->second.second;
-        metadata.insert({label, {weight, reprs.size()}});
+    for (const auto &it : samples) {
+        auto label = it.first;
+        auto weight = it.second.first;
+        const representative_collection_t& reprs = it.second.second;
+        metadata.emplace_back(std::make_tuple(label, weight, reprs.size()));
 
         for (const representative_t& repr : reprs) {
             ASSERT(repr.size() == num_samples_per_representative);
             for (const torch::Tensor& tensor : repr) {
                 ASSERT(tensor.nbytes() != 0);
                 ASSERT(tensor.is_contiguous());
+                /*
+                TEST:
+                ASSERT(label == tensor[0][0][0].item().toInt());
+                DBG("value " << tensor[0][0][0].item().toInt());
+                */
                 segments.emplace_back(tensor.data_ptr(), tensor.nbytes());
             }
         }
     }
-    ASSERT(c == segments.size())
+    ASSERT(c == segments.size());
+    ASSERT(samples.size() == metadata.size());
+
+    /*
+    TEST:
+    int s = 0;
+    DBG("checking if the metadata reflects the segments, iterating on metadata (FAILING)..");
+    for (auto const &it : metadata) {
+        auto label = std::get<0>(it);
+        DBG("for label " << label);
+        for (int num_reps = 0; num_reps < std::get<2>(it); num_reps++) {
+            DBG("num_reps " << num_reps);
+            DBG("value " << torch::from_blob(segments[s].first, representative_shape, torch::kFloat32)[0][0][0].item().toInt());
+            ASSERT(label == torch::from_blob(segments[s].first, representative_shape, torch::kFloat32)[0][0][0].item().toInt());
+            s++;
+        }
+    }
+    */
 
     if (segments.size() > 0) {
         tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);

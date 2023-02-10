@@ -7,8 +7,8 @@
 #include <tuple>
 #include <random>
 
-typedef std::vector<torch::Tensor> buffer_t;
-typedef std::unordered_map<int, std::pair<double, buffer_t>> rehearsal_map_t;
+typedef std::vector<torch::Tensor> representative_collection_t;
+typedef std::unordered_map<int, std::pair<double, representative_collection_t>> rehearsal_map_t;
 typedef std::unordered_map<int, int> rehearsal_counts_t;
 
 class stream_loader_t {
