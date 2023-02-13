@@ -123,100 +123,108 @@ void distributed_stream_loader_t::async_process() {
         int R = batch.aug_samples.sizes()[0] - batch_size;
         assert(R > 0 && R + batch_size == batch.aug_targets.sizes()[0]
             && R + batch_size == batch.aug_weights.sizes()[0]);
-        auto nbytes = batch.samples[0].nbytes();
 
         // Initialization of the augmented result
         for (int i = 0; i < batch_size; i++) {
             batch.aug_samples.index_put_({i}, batch.samples[i]);
             batch.aug_targets.index_put_({i}, batch.targets[i]);
             batch.aug_weights.index_put_({i}, 1.0);
+            batch.aug_size = batch_size;
         }
 
-        // R will be greater if last batch has a smaller size
-        //TODO: could be simplified (indices generation)
-        std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
-
-        int k;
-        torch::Tensor* buffer;
-        bool use_cpu_buffer = !cuda_rdma && batch.aug_samples.device().type() == torch::kCUDA;
-        if (use_cpu_buffer) {
-            // Use a temporary CPU buffer that will be copied to CUDA later
-            auto shape = representative_shape;
-            shape.insert(shape.begin(), R);
-            buffer = new torch::Tensor(torch::zeros(shape));
-            k = 0;
-        } else {
-            buffer = &batch.aug_samples;
-            k = batch_size;
-        }
-
-        // Iterate over nodes
-        std::vector<tl::async_response> responses;
-        std::vector<std::vector<std::pair<void*, std::size_t>>> all_segments;
-        for (const auto& indices : indices_per_node) {
-            auto& segments = all_segments.emplace_back(indices.second.size() * num_samples_per_representative);
-            // Each segment maps to an individual tensor
-            for (auto& segment : segments) {
-                ASSERT(buffer->is_contiguous());
-                segment.first = (char *) buffer->data_ptr() + k * nbytes;
-                segment.second = nbytes;
-                k++;
-            }
-
-            tl::provider_handle& ph = provider_handles[indices.first];
-            tl::bulk local_bulk = server_engine.expose(segments, tl::bulk_mode::write_only);
-            responses.emplace_back(get_samples_procedure.on(ph).async(local_bulk, indices.second));
-        }
-
-        k = batch_size;
-        int i = 0;
-        for (const auto& indices : indices_per_node) {
-            std::vector<std::tuple<int, double, std::size_t>> metadata = responses[i].wait();
-            for (const auto &it : metadata) {
-                int label;
-                double weight;
-                std::size_t num_targets;
-                std::tie(label, weight, num_targets) = it;
-                for (int j = 0; j < num_targets; j++) {
-                    batch.aug_targets.index_put_({k}, label);
-                    batch.aug_weights.index_put_({k}, weight);
-                    k++;
-                }
-            }
-            i++;
-        }
-        batch.aug_size = k;
-
-        if (use_cpu_buffer) {
-            ASSERT(k - batch_size <= R);
-            ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
-                              buffer->data_ptr(),
-                              (k - batch_size) * nbytes, 
-                              cudaMemcpyHostToDevice
-            ) == cudaSuccess);
-            delete buffer;
-        }
-
-        /*
-        TEST:
-        for (int i = 0; i < batch.aug_size; i++) {
-            if (batch.aug_targets[i].item().toInt() != batch.aug_samples[i][0][0][0].item().toInt()) {
-                std::cout << "fail it " << i << std::endl;
-                std::cout << "label " << batch.aug_targets[i].item().toInt() << std::endl;
-                std::cout << "value " << batch.aug_samples[i][0][0][0].item().toInt() << std::endl;
-                ASSERT(false);
-            }
-        }
-        */
+        if (augmentation_enabled)
+            augment_batch(batch, R);
 
         lock.lock();
         response_queue.emplace_back(batch);
         lock.unlock();
         request_cond.notify_one();
 
-        populate_rehearsal_buffer(batch, batch_size);
+        populate_rehearsal_buffer(batch);
         update_representative_weights(R, batch_size);
     }
+}
+
+int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
+    auto batch_size = batch.samples.sizes()[0];
+    auto nbytes = batch.samples[0].nbytes();
+
+    // R will be greater if last batch has a smaller size
+    //TODO: could be simplified (indices generation)
+    std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
+
+    int k;
+    torch::Tensor* buffer;
+    bool use_cpu_buffer = !cuda_rdma && batch.aug_samples.device().type() == torch::kCUDA;
+    if (use_cpu_buffer) {
+        // Use a temporary CPU buffer that will be copied to CUDA later
+        auto shape = representative_shape;
+        shape.insert(shape.begin(), R);
+        buffer = new torch::Tensor(torch::zeros(shape));
+        k = 0;
+    } else {
+        buffer = &batch.aug_samples;
+        k = batch_size;
+    }
+
+    // Iterate over nodes
+    std::vector<tl::async_response> responses;
+    std::vector<std::vector<std::pair<void*, std::size_t>>> all_segments;
+    for (const auto& indices : indices_per_node) {
+        auto& segments = all_segments.emplace_back(indices.second.size() * num_samples_per_representative);
+        // Each segment maps to an individual tensor
+        for (auto& segment : segments) {
+            ASSERT(buffer->is_contiguous());
+            segment.first = (char *) buffer->data_ptr() + k * nbytes;
+            segment.second = nbytes;
+            k++;
+        }
+
+        tl::provider_handle& ph = provider_handles[indices.first];
+        tl::bulk local_bulk = server_engine.expose(segments, tl::bulk_mode::write_only);
+        responses.emplace_back(get_samples_procedure.on(ph).async(local_bulk, indices.second));
+    }
+
+    k = batch_size;
+    for (int i = 0; i < indices_per_node.size(); i++) {
+        std::vector<std::tuple<int, double, std::size_t>> metadata = responses[i].wait();
+        for (const auto &it : metadata) {
+            int label;
+            double weight;
+            std::size_t num_targets;
+            std::tie(label, weight, num_targets) = it;
+            for (int j = 0; j < num_targets; j++) {
+                batch.aug_targets.index_put_({k}, label);
+                batch.aug_weights.index_put_({k}, weight);
+                k++;
+            }
+        }
+    }
+    batch.aug_size = k;
+
+    if (use_cpu_buffer) {
+        ASSERT(k - batch_size <= R);
+        ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
+                            buffer->data_ptr(),
+                            (k - batch_size) * nbytes, 
+                            cudaMemcpyHostToDevice
+        ) == cudaSuccess);
+        delete buffer;
+    }
+
+    /*
+    TEST:
+    for (int i = 0; i < batch.aug_size; i++) {
+        if (batch.aug_targets[i].item().toInt() != batch.aug_samples[i][0][0][0].item().toInt()) {
+            std::cout << "fail it " << i << std::endl;
+            std::cout << "label " << batch.aug_targets[i].item().toInt() << std::endl;
+            std::cout << "value " << batch.aug_samples[i][0][0][0].item().toInt() << std::endl;
+            ASSERT(false);
+        }
+    }
+    */
+
+    return k;
 }
 
 /**
@@ -252,7 +260,8 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
  * Accumulate in Python
  * Tip: pick indices then replace
  */
-void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch, int batch_size) {
+void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
+    auto batch_size = batch.samples.sizes()[0];
     std::uniform_int_distribution<unsigned int> dice(0, batch_size - 1);
     for (int i = 0; i < batch_size; i++) {
         if (dice(rand_gen) >= C)
@@ -286,8 +295,8 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
     }
 }
 
-void distributed_stream_loader_t::update_representative_weights(int effective_representatives, int batch_size) {
-    double weight = (double) batch_size / (double) (effective_representatives * rehearsal_size);
+void distributed_stream_loader_t::update_representative_weights(int num_representatives, int batch_size) {
+    double weight = (double) batch_size / (double) (num_representatives * rehearsal_size);
     for (auto &pair : rehearsal_metadata) {
         pair.second = std::max(std::log(pair.first * weight), 1.0);
     }
@@ -319,6 +328,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             const int num_zeros = std::count_if(rehearsal_metadata.begin(), rehearsal_metadata.end(),
                 [](const auto &p) { return p.first == 0; }
             );
+            // We only consider classes with at least one element
             rehearsal_class_index %= (rehearsal_metadata.size() - num_zeros);
 
             int j = -1, i = 0;
@@ -448,6 +458,10 @@ int distributed_stream_loader_t::wait() {
     auto batch = response_queue.front();
     response_queue.pop_front();
     return batch.aug_size;
+}
+
+void distributed_stream_loader_t::enable_augmentation(bool state) {
+    augmentation_enabled = state;
 }
 
 size_t distributed_stream_loader_t::get_rehearsal_size() {

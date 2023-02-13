@@ -30,6 +30,7 @@ public:
 
 class distributed_stream_loader_t : public engine_loader_t, public tl::provider<distributed_stream_loader_t> {
     const size_t MAX_QUEUE_SIZE = 1024;
+    bool augmentation_enabled = false;
 
     Task task_type;
     unsigned int K, N, C;
@@ -60,15 +61,16 @@ class distributed_stream_loader_t : public engine_loader_t, public tl::provider<
     // client thread
     tl::managed<tl::xstream> es;
     tl::managed<tl::thread> async_thread;
-
     std::vector<tl::provider_handle> provider_handles;
     tl::remote_procedure get_samples_procedure;
+
+    int augment_batch(queue_item_t &batch, int num_representatives);
+    void populate_rehearsal_buffer(const queue_item_t& batch);
+    void update_representative_weights(int num_representatives, int batch_size);
 
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
     rehearsal_map_t get_samples(const std::vector<int>& indices);
     void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices);
-    void populate_rehearsal_buffer(const queue_item_t& batch, int batch_size);
-    void update_representative_weights(int effective_representatives, int batch_size);
     std::map<std::string, int> gather_endpoints() const;
 
 public:
@@ -85,6 +87,7 @@ public:
     void accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
             const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
     int wait();
+    void enable_augmentation(bool state);
     size_t get_rehearsal_size();
     size_t get_history_count();
 };
