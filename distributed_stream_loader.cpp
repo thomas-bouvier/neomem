@@ -186,14 +186,14 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
     }
 
     k = batch_size;
-    for (int i = 0; i < indices_per_node.size(); i++) {
+    for (size_t i = 0; i < indices_per_node.size(); i++) {
         std::vector<std::tuple<int, double, std::size_t>> metadata = responses[i].wait();
         for (const auto &it : metadata) {
             int label;
             double weight;
-            std::size_t num_targets;
+            size_t num_targets;
             std::tie(label, weight, num_targets) = it;
-            for (int j = 0; j < num_targets; j++) {
+            for (size_t j = 0; j < num_targets; j++) {
                 batch.aug_targets.index_put_({k}, label);
                 batch.aug_weights.index_put_({k}, weight);
                 k++;
@@ -271,14 +271,14 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
             label = batch.targets[i].item<int>();
 
         std::unique_lock<tl::mutex> lock(rehearsal_mutex);
-        int index = -1;
+        size_t index = -1;
         if (rehearsal_metadata[label].first < N)
             index = rehearsal_metadata[label].first;
         else
             index = dice(rand_gen);
         // The random replacement strategy does nothing sometimes
         if (index < N) {
-            for (int r = 0; r < num_samples_per_representative; r++) {
+            for (size_t r = 0; r < num_samples_per_representative; r++) {
                 //TODO reconstruction
                 torch::Tensor tensor = batch.samples.index({i}).detach().clone();
                 ASSERT(tensor.nbytes() != 0);
@@ -308,7 +308,7 @@ void distributed_stream_loader_t::update_representative_weights(int num_represen
  * valid data, no matter the data
  */
 void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) {
-    int c = 0;
+    size_t c = 0;
     rehearsal_map_t samples;
 
     /**
@@ -331,7 +331,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             // We only consider classes with at least one element
             rehearsal_class_index %= (rehearsal_metadata.size() - num_zeros);
 
-            int j = -1, i = 0;
+            size_t j = -1, i = 0;
             for (; i < rehearsal_metadata.size(); i++) {
                 if (rehearsal_metadata[i].first == 0)
                     continue;
@@ -342,7 +342,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
 
             const size_t rehearsal_repr_of_class_index = (index % N) % rehearsal_metadata[i].first;
             representative_t repr;
-            for (int r = 0; r < num_samples_per_representative; r++) {
+            for (size_t r = 0; r < num_samples_per_representative; r++) {
                 auto tensor = rehearsal_vector[i * N + rehearsal_repr_of_class_index + r];
                 /*
                 TEST:
