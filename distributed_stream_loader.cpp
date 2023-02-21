@@ -1,14 +1,16 @@
 #include "distributed_stream_loader.hpp"
+#include "mpi_utils.hpp"
 
 #include <tuple>
 #include <assert.h>
 
 #include <thallium/serialization/stl/tuple.hpp>
 #include <thallium/serialization/stl/vector.hpp>
-#include <cuda_runtime.h>
 #include <cereal/types/string.hpp>
 
-#include "mpi_utils.hpp"
+#ifndef WITHOUT_CUDA
+#include <cuda_runtime.h>
+#endif
 
 #define __DEBUG
 #define __ASSERT
@@ -28,7 +30,7 @@ engine_loader_t::~engine_loader_t() {
 }
 
 /**
- * This constructor initializes the provider. This class is both a server and a 
+ * This constructor initializes the provider. This class is both a server and a
  * client. There are n clients and n servers. Each client can get data from the
  * n servers. (n x n relation).
  *
@@ -204,11 +206,13 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
 
     if (use_cpu_buffer) {
         ASSERT(k - batch_size <= R);
+        #ifndef WITHOUT_CUDA
         ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
                             buffer->data_ptr(),
-                            (k - batch_size) * nbytes, 
+                            (k - batch_size) * nbytes,
                             cudaMemcpyHostToDevice
         ) == cudaSuccess);
+        #endif
         delete buffer;
     }
 
