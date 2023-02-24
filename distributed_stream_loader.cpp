@@ -20,7 +20,7 @@ using namespace torch::indexing;
 
 //TODO: constructor with device registration
 engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_id) :
-    server_engine(address, THALLIUM_SERVER_MODE, true, POOL_SIZE) {
+    server_engine(address, THALLIUM_SERVER_MODE, true, POOL_SIZE), server_id(provider_id) {
     std::cout << "Server running at address " << server_engine.self()
                 << " with provider id " << provider_id << std::endl;
 }
@@ -86,7 +86,7 @@ std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const
     MPI_Comm_size(MPI_COMM_WORLD, &num_workers);
 
     std::map<std::string, int> endpoints = {{server_engine.self(), server_id}};
-    auto all_endpoints = gather_dictionary(endpoints, MAX_CF_LENGTH, num_workers, rank);
+    auto all_endpoints = gather_dictionary(endpoints, num_workers);
 
     if (!was_initialized) {
         MPI_Finalize();
@@ -186,6 +186,7 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         tl::bulk local_bulk = server_engine.expose(segments, tl::bulk_mode::write_only);
         responses.emplace_back(get_samples_procedure.on(ph).async(local_bulk, indices.second));
     }
+    ASSERT(responses.size() == indices_per_node.size());
 
     k = batch_size;
     for (size_t i = 0; i < indices_per_node.size(); i++) {
@@ -428,7 +429,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     */
 
     if (segments.size() > 0) {
-        tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);
+        tl::bulk bulk = server_engine.expose(segments, tl::bulk_mode::read_only);
         bulk >> b.on(req.get_endpoint());
     }
     req.respond(metadata);

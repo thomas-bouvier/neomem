@@ -6,6 +6,7 @@ wandb
 *.jpg
 *.json
 *.txt
+*.py
 rehearsal
 .ccls
 .ccls-cache

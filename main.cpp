@@ -38,11 +38,9 @@ int main(int argc, char** argv) {
         std::cin.clear();
     }
 
-    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 1, {3, 224, 224}, false, true);
-    for (auto endpoint : endpoints) {
-        std::cout << "Checking " << endpoint.first << ", " << endpoint.second << std::endl;
-    }
+    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 1, {3, 224, 224}, false, true, true);
     dsl.register_endpoints(endpoints);
+    dsl.enable_augmentation(true);
 
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
     torch::Tensor aug_samples = torch::zeros({N + R, 3, 224, 224}, options);

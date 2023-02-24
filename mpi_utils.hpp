@@ -2,55 +2,38 @@
 #include <iostream>
 #include <map>
 #include <string>
-#include <cstring>
-
-#define MAX_CF_LENGTH 55
 
 using dictionary = std::map<std::string, int>;
 
-dictionary gather_dictionary(dictionary &dict, int max_key_length, int num_workers, int rank) {
-    // Calculate destination dictionary size
-    int num_keys = dict.size();
-    int total_length = num_keys * max_key_length;
-    int final_num_keys = 0;
-    MPI_Allreduce(&num_keys, &final_num_keys, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+dictionary gather_dictionary(const dictionary &dict, int num_workers) {
+    int map_size = dict.size();
+    MPI_Allgather(&map_size, 1, MPI_INT, &map_size, 1, MPI_INT, MPI_COMM_WORLD);
 
-    // Computing number of elements that are received from each process
-    int *recvcounts = NULL;
-    recvcounts = new int[num_workers];
-    MPI_Allgather(&total_length, 1, MPI_INT, recvcounts, 1, MPI_INT, MPI_COMM_WORLD);
+    // Define the arrays to hold the map data
+    std::string* keys = new std::string[map_size];
+    int* values = new int[map_size];
 
-    // Computing displacement relative to recvbuf at which to place the incoming data from each process
-    int *displs = NULL;
-    int totLen = 0;
-    displs = new int[num_workers];
-    displs[0] = 0;
-    totLen += recvcounts[0] + 1;
-    for (int i = 1; i < num_workers; i++) {
-        totLen += recvcounts[i];
-        displs[i] = displs[i - 1] + recvcounts[i - 1];
-    }
-
-    char dict_keys[num_keys][max_key_length];
-    char final_dict_keys[final_num_keys][max_key_length];
-
-    // Collect keys for each process
+    // Copy the keys and values from the map into the arrays
     int i = 0;
-    for (auto pair : dict) {
-        strncpy(dict_keys[i], pair.first.c_str(), max_key_length);
+    for (auto& [key, value] : dict) {
+        keys[i] = key;
+        values[i] = value;
         i++;
     }
-    MPI_Allgatherv(dict_keys, total_length, MPI_CHAR, final_dict_keys, recvcounts, displs, MPI_CHAR, MPI_COMM_WORLD);
 
-    // Create new dictionary and distribute it to all processes
-    dict.clear();
-    for (int i = 0; i < final_num_keys; i++) {
-        dict[final_dict_keys[i]] = dict.size();
+    // Exchange the keys and values arrays between all processes
+    MPI_Allgather(keys, map_size, MPI_CHAR, keys, map_size, MPI_CHAR, MPI_COMM_WORLD);
+    MPI_Allgather(values, map_size, MPI_INT, values, map_size, MPI_INT, MPI_COMM_WORLD);
+
+    // Construct the final map
+    std::map<std::string, int> gathered_map;
+    for (int i = 0; i < num_workers * map_size; i++) {
+        gathered_map[keys[i]] = values[i];
     }
 
-    delete[] recvcounts;
-    delete[] displs;
+    // Clean up
+    delete[] keys;
+    delete[] values;
 
-    return dict;
+    return gathered_map;
 }
-
