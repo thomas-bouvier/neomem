@@ -184,13 +184,18 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
 
         tl::provider_handle& ph = provider_handles[indices.first];
         tl::bulk local_bulk = server_engine.expose(segments, tl::bulk_mode::write_only);
-        responses.emplace_back(get_samples_procedure.on(ph).async(local_bulk, indices.second));
+
+        auto response = get_samples_procedure.on(ph).async(local_bulk, indices.second);
+        responses.push_back(std::move(response));
     }
     ASSERT(responses.size() == indices_per_node.size());
 
     k = batch_size;
     for (size_t i = 0; i < indices_per_node.size(); i++) {
-        std::vector<std::tuple<int, double, std::size_t>> metadata = responses[i].wait();
+        decltype(responses.begin()) completed;
+        std::vector<std::tuple<int, double, size_t>> metadata = tl::async_response::wait_any(responses.begin(), responses.end(), completed);
+        responses.erase(completed);
+
         for (const auto &it : metadata) {
             int label;
             double weight;
@@ -233,8 +238,7 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
 }
 
 /**
- * Selection without replacement from remote nodes + current node
- * get_samples in Python
+ * Selection without replacement from remote nodes + current node.
  */
 std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int R) {
     const unsigned int max_global_index = provider_handles.size() * K * N;
@@ -261,10 +265,6 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
     return indices_per_node;
 }
 
-/**
- * Accumulate in Python
- * Tip: pick indices then replace
- */
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
     auto batch_size = batch.samples.sizes()[0];
     std::uniform_int_distribution<unsigned int> dice(0, batch_size - 1);
@@ -307,11 +307,6 @@ void distributed_stream_loader_t::update_representative_weights(int num_represen
     }
 }
 
-/**
- * Tip: keep references in temporary data structure
- * Tip: no need to lock, tensors are thread safe and we only care about having
- * valid data, no matter the data
- */
 void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices) {
     size_t c = 0;
     rehearsal_map_t samples;
@@ -387,8 +382,8 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     * repA and repB are of label1, repC and repD are of label2
     * TODO: complete this comment to explain how representatives are expanded
     **/
-    std::vector<std::tuple<int, double, std::size_t>> metadata;
-    std::vector<std::pair<void*, std::size_t>> segments;
+    std::vector<std::tuple<int, double, size_t>> metadata;
+    std::vector<std::pair<void*, size_t>> segments;
     for (const auto &it : samples) {
         auto label = it.first;
         auto weight = it.second.first;
