@@ -18,17 +18,6 @@
 
 using namespace torch::indexing;
 
-//TODO: constructor with device registration
-engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_id) :
-    server_engine(address, THALLIUM_SERVER_MODE, true, POOL_SIZE), server_id(provider_id) {
-    std::cout << "Server running at address " << server_engine.self()
-                << " with provider id " << provider_id << std::endl;
-}
-
-engine_loader_t::~engine_loader_t() {
-    server_engine.wait_for_finalize();
-}
-
 /**
  * This constructor initializes the provider. This class is both a server and a
  * client. There are n clients and n servers. Each client can get data from the
@@ -38,19 +27,19 @@ engine_loader_t::~engine_loader_t() {
  * content of its rehearsal buffer by sampling from the n other rehearsal
  * buffers.
  */
-distributed_stream_loader_t::distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C,
-    int64_t seed, uint16_t _server_id, const std::string& server_address,
-    unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
-    bool _cuda_rdma, bool discover_endpoints, bool _verbose)
-        : engine_loader_t(server_address, _server_id), tl::provider<distributed_stream_loader_t>(server_engine, _server_id),
+distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& _engine_loader,
+    Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C,
+    int64_t seed, unsigned int _num_samples_per_representative,
+    std::vector<long> _representative_shape,
+    bool discover_endpoints, bool _verbose)
+        : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id()),
+        engine_loader(_engine_loader),
         task_type(_task_type), K(_K), N(_N), C(_C), rand_gen(seed),
         num_samples_per_representative(_num_samples_per_representative),
-        representative_shape(_representative_shape), cuda_rdma(_cuda_rdma),
-        verbose(_verbose) {
-
+        representative_shape(_representative_shape), verbose(_verbose) {
     define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
-    get_samples_procedure = server_engine.define("get_samples");
+    get_samples_procedure = get_engine().define("get_samples");
 
     // The thread executing the actual client issuing rpcs
     es = tl::xstream::create();
@@ -85,7 +74,7 @@ std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_workers);
 
-    std::map<std::string, int> endpoints = {{server_engine.self(), server_id}};
+    std::map<std::string, int> endpoints = {{get_engine().self(), engine_loader.get_id()}};
     auto all_endpoints = gather_dictionary(endpoints, num_workers);
 
     if (!was_initialized) {
@@ -97,7 +86,7 @@ std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const
 void distributed_stream_loader_t::register_endpoints(const std::map<std::string, int>& endpoints) {
     for (auto endpoint : endpoints) {
         std::cout << "Looking up " << endpoint.first << ", " << endpoint.second << std::endl;
-        tl::endpoint server = server_engine.lookup(endpoint.first);
+        tl::endpoint server = get_engine().lookup(endpoint.first);
         provider_handles.emplace_back(tl::provider_handle(server, endpoint.second));
     }
 }
@@ -157,7 +146,7 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
 
     int k;
     torch::Tensor* buffer;
-    bool use_cpu_buffer = !cuda_rdma && batch.aug_samples.device().type() == torch::kCUDA;
+    bool use_cpu_buffer = !engine_loader.is_cuda_rdma_enabled() && batch.aug_samples.device().type() == torch::kCUDA;
     if (use_cpu_buffer) {
         // Use a temporary CPU buffer that will be copied to CUDA later
         auto shape = representative_shape;
@@ -183,7 +172,7 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         }
 
         tl::provider_handle& ph = provider_handles[indices.first];
-        tl::bulk local_bulk = server_engine.expose(segments, tl::bulk_mode::write_only);
+        tl::bulk local_bulk = get_engine().expose(segments, tl::bulk_mode::write_only);
 
         auto response = get_samples_procedure.on(ph).async(local_bulk, indices.second);
         responses.push_back(std::move(response));
@@ -424,7 +413,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     */
 
     if (segments.size() > 0) {
-        tl::bulk bulk = server_engine.expose(segments, tl::bulk_mode::read_only);
+        tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);
         bulk >> b.on(req.get_endpoint());
     }
     req.respond(metadata);

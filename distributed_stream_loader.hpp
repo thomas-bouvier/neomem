@@ -1,6 +1,8 @@
 #ifndef __DISTRIBUTED_STREAM_LOADER
 #define __DISTRIBUTED_STREAM_LOADER
 
+#include "engine_loader.hpp"
+
 #include <torch/extension.h>
 #include <thallium.hpp>
 #include <unordered_map>
@@ -16,21 +18,12 @@ typedef std::vector<torch::Tensor> representative_t;
 typedef std::vector<representative_t> representative_collection_t;
 typedef std::unordered_map<int, std::pair<double, representative_collection_t>> rehearsal_map_t;
 
-class engine_loader_t {
-    static const unsigned int POOL_SIZE = 4;
-protected:
-    tl::engine server_engine;
-    uint16_t server_id;
 
-public:
-    engine_loader_t(const std::string& server_address, uint16_t server_id);
-    ~engine_loader_t();
-};
-
-
-class distributed_stream_loader_t : public engine_loader_t, public tl::provider<distributed_stream_loader_t> {
+class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
     const size_t MAX_QUEUE_SIZE = 1024;
     bool augmentation_enabled = false;
+
+    engine_loader_t engine_loader;
 
     Task task_type;
     unsigned int K, N, C;
@@ -74,11 +67,11 @@ class distributed_stream_loader_t : public engine_loader_t, public tl::provider<
     std::map<std::string, int> gather_endpoints() const;
 
 public:
-    distributed_stream_loader_t(Task _task_type, unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
-        uint16_t server_id, const std::string& server_address,
-        unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
-        bool _cuda_rdma, bool discover_endpoints = false,
-        bool _verbose = false);
+    distributed_stream_loader_t(const engine_loader_t& engine, Task _task_type,
+        unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
+        unsigned int _num_samples_per_representative,
+        std::vector<long> _representative_shape,
+        bool discover_endpoints = false, bool _verbose = false);
     ~distributed_stream_loader_t();
 
     void register_endpoints(const std::map<std::string, int>& endpoints);

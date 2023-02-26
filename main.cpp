@@ -46,7 +46,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 1, {3, 224, 224}, false, discover_endpoints, true);
+    engine_loader_t engine(server_address, server_id);
+    distributed_stream_loader_t dsl(engine, Classification, K, N, C, seed, 1, {3, 224, 224}, discover_endpoints, true);
     dsl.register_endpoints(endpoints);
     dsl.enable_augmentation(true);
 

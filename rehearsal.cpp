@@ -7,10 +7,13 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(rehearsal, m) {
-    m.doc() = "pybind11 based streaming rehearsal buffer"; // optional module docstring
+    m.doc() = "Neomem: pybind11 based streaming rehearsal buffer";
+
+    py::class_<engine_loader_t>(m, "EngineLoader")
+        .def(py::init<std::string, uint16_t, bool>(), py::call_guard<py::scoped_ostream_redirect>());
 
     py::class_<distributed_stream_loader_t>(m, "DistributedStreamLoader")
-        .def(py::init<Task, unsigned int, unsigned int, unsigned int, int64_t, uint16_t, std::string, unsigned int, std::vector<long>, bool, bool, bool>(), py::call_guard<py::scoped_ostream_redirect>())
+        .def(py::init<engine_loader_t, Task, unsigned int, unsigned int, unsigned int, int64_t, unsigned int, std::vector<long>, bool, bool>(), py::call_guard<py::scoped_ostream_redirect>())
         .def("register_endpoints", &distributed_stream_loader_t::register_endpoints)
         .def("accumulate", &distributed_stream_loader_t::accumulate)
         .def("wait", &distributed_stream_loader_t::wait)
