@@ -32,7 +32,7 @@ CC=g++
 FLAGS=-O3 -Wall -std=c++17 -fPIC -Wl,--no-as-needed -D_GLIBCXX_USE_CXX11_ABI=$(WITH_ABI)
 
 all:
-	$(CC) $(OPTS) -shared $(FLAGS) $(INCLUDES) rehearsal.cpp stream_loader.cpp distributed_stream_loader.cpp -o $(MAIN)$(EXT) $(LIBS)
+	$(CC) $(OPTS) -shared $(FLAGS) $(INCLUDES) rehearsal.cpp distributed_stream_loader.cpp -o $(MAIN)$(EXT) $(LIBS)
 test:
 	$(CC) $(OPTS) -g $(FLAGS) $(INCLUDES) distributed_stream_loader.cpp main.cpp -o $(MAIN) $(LIBS)
 clean:
