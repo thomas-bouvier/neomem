@@ -25,20 +25,28 @@ int main(int argc, char** argv) {
         endpoints.insert(endpoint);
         std::cout << "Endpoint " << endpoint.first << ", " << endpoint.second << std::endl;
     }
-    while (true) {
-        std::string address;
-        int provider_id;
-        std::cout << "Endpoint to sample from (local endpoint is NOT already-included)? ";
-        std::cin >> address;
-        if (address == "no") break;
-        std::cin >> provider_id;
-        auto endpoint = std::make_pair<>(address, provider_id);
-        endpoints.insert(endpoint);
-        std::cout << "Endpoint " << address << ", " << provider_id << std::endl;
-        std::cin.clear();
+
+    bool discover_endpoints = true;
+    std::string choice;
+    std::cout << "Discover endpoints via MPI? ";
+    std::cin >> choice;
+    if (choice == "no") {
+        while (true) {
+            discover_endpoints = false;
+            std::string address;
+            int provider_id;
+            std::cout << "Endpoint to sample from (local endpoint is NOT already-included)? ";
+            std::cin >> address;
+            if (address == "no") break;
+            std::cin >> provider_id;
+            auto endpoint = std::make_pair<>(address, provider_id);
+            endpoints.insert(endpoint);
+            std::cout << "Endpoint " << address << ", " << provider_id << std::endl;
+            std::cin.clear();
+        }
     }
 
-    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 1, {3, 224, 224}, false, true, true);
+    distributed_stream_loader_t dsl(Classification, K, N, C, seed, server_id, server_address, 1, {3, 224, 224}, false, discover_endpoints, true);
     dsl.register_endpoints(endpoints);
     dsl.enable_augmentation(true);
 
