@@ -62,7 +62,6 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     void update_representative_weights(int num_representatives, int batch_size);
 
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
-    rehearsal_map_t get_samples(const std::vector<int>& indices);
     void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices);
     std::map<std::string, int> gather_endpoints() const;
 
@@ -80,6 +79,7 @@ public:
     void accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
             const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
     int wait();
+
     void enable_augmentation(bool state);
     size_t get_rehearsal_size();
     size_t get_history_count();

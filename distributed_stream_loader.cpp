@@ -158,27 +158,32 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         k = batch_size;
     }
 
-    // Iterate over nodes
+    // These objects should live as long as rpc requests are not resolved
     std::vector<tl::async_response> responses;
-    std::vector<std::vector<std::pair<void*, std::size_t>>> all_segments;
+    std::vector<std::vector<std::pair<void*, std::size_t>>> segments;
+    std::vector<tl::bulk> bulks;
+
+    // Iterate over nodes and issuing corresponding rpc requests
     for (const auto& indices : indices_per_node) {
-        auto& segments = all_segments.emplace_back(indices.second.size() * num_samples_per_representative);
+        auto& inserted_segments = segments.emplace_back(indices.second.size() * num_samples_per_representative);
         // Each segment maps to an individual tensor
-        for (auto& segment : segments) {
+        for (auto& s : inserted_segments) {
             ASSERT(buffer->is_contiguous());
-            segment.first = (char *) buffer->data_ptr() + k * nbytes;
-            segment.second = nbytes;
+            s.first = (char *) buffer->data_ptr() + k * nbytes;
+            s.second = nbytes;
             k++;
         }
 
         tl::provider_handle& ph = provider_handles[indices.first];
-        tl::bulk local_bulk = get_engine().expose(segments, tl::bulk_mode::write_only);
+        tl::bulk bulk = get_engine().expose(inserted_segments, tl::bulk_mode::write_only);
+        bulks.push_back(std::move(bulk));
 
-        auto response = get_samples_procedure.on(ph).async(local_bulk, indices.second);
+        auto response = get_samples_procedure.on(ph).async(bulks.back(), indices.second);
         responses.push_back(std::move(response));
     }
     ASSERT(responses.size() == indices_per_node.size());
 
+    // Waiting for rpc requests to resolve
     k = batch_size;
     for (size_t i = 0; i < indices_per_node.size(); i++) {
         decltype(responses.begin()) completed;
