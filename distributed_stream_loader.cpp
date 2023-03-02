@@ -3,6 +3,7 @@
 
 #include <tuple>
 #include <assert.h>
+#include <chrono>
 
 #include <thallium/serialization/stl/tuple.hpp>
 #include <thallium/serialization/stl/vector.hpp>
@@ -105,6 +106,8 @@ void distributed_stream_loader_t::async_process() {
         request_queue.pop_front();
         lock.unlock();
 
+        // COPY m into m'
+        auto now = std::chrono::system_clock::now();
         // An empty batch is a signal for shutdown
         if (!batch.samples.defined())
             break;
@@ -122,17 +125,23 @@ void distributed_stream_loader_t::async_process() {
             batch.aug_weights.index_put_({i}, 1.0);
             batch.aug_size = batch_size;
         }
+        metrics[i_batch].batch_copy_time = std::chrono::system_clock::now() - now;
 
         if (augmentation_enabled)
             augment_batch(batch, R);
+
+        i_batch++;
 
         lock.lock();
         response_queue.emplace_back(batch);
         lock.unlock();
         request_cond.notify_one();
 
+        // UPDATE buffer
+        now = std::chrono::system_clock::now();
         populate_rehearsal_buffer(batch);
         update_representative_weights(R, batch_size);
+        metrics[i_batch].buffer_update_time = std::chrono::system_clock::now() - now;
     }
 }
 
@@ -140,6 +149,8 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
     auto batch_size = batch.samples.sizes()[0];
     auto nbytes = batch.samples[0].nbytes();
 
+    // PREPARE bulk
+    auto now = std::chrono::system_clock::now();
     // R will be greater if last batch has a smaller size
     //TODO: could be simplified (indices generation)
     std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
@@ -182,7 +193,10 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         responses.push_back(std::move(response));
     }
     ASSERT(responses.size() == indices_per_node.size());
+    metrics[i_batch].bulk_prepare_time = std::chrono::system_clock::now() - now;
 
+    // SAMPLE globally
+    now = std::chrono::system_clock::now();
     // Waiting for rpc requests to resolve
     k = batch_size;
     for (size_t i = 0; i < indices_per_node.size(); i++) {
@@ -203,8 +217,11 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         }
     }
     batch.aug_size = k;
+    metrics[i_batch].rpcs_resolve_time = std::chrono::system_clock::now() - now;
 
     if (use_cpu_buffer) {
+        // COPY representatives
+        now = std::chrono::system_clock::now();
         ASSERT(k - batch_size <= R);
         #ifndef WITHOUT_CUDA
         ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
@@ -214,6 +231,7 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         ) == cudaSuccess);
         #endif
         delete buffer;
+        metrics[i_batch].representatives_copy_time = std::chrono::system_clock::now() - now;
     }
 
     /*
@@ -464,6 +482,12 @@ size_t distributed_stream_loader_t::get_rehearsal_size() {
 
 size_t distributed_stream_loader_t::get_history_count() {
     return history_count;
+}
+
+std::vector<double> distributed_stream_loader_t::get_metrics(size_t i_batch) {
+    if (!metrics.count(i_batch))
+        return {};
+    return metrics[i_batch].get_durations();
 }
 
 distributed_stream_loader_t::~distributed_stream_loader_t() {

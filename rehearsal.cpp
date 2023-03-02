@@ -19,7 +19,8 @@ PYBIND11_MODULE(rehearsal, m) {
         .def("wait", &distributed_stream_loader_t::wait)
         .def("enable_augmentation", &distributed_stream_loader_t::enable_augmentation)
         .def("get_rehearsal_size", &distributed_stream_loader_t::get_rehearsal_size)
-        .def("get_history_count", &distributed_stream_loader_t::get_history_count);
+        .def("get_history_count", &distributed_stream_loader_t::get_history_count)
+        .def("get_metrics", &distributed_stream_loader_t::get_metrics);
 
     py::enum_<Task>(m, "Task")
         .value("Classification", Classification)

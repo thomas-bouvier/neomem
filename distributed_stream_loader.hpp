@@ -2,6 +2,7 @@
 #define __DISTRIBUTED_STREAM_LOADER
 
 #include "engine_loader.hpp"
+#include "metrics.hpp"
 
 #include <torch/extension.h>
 #include <thallium.hpp>
@@ -36,6 +37,9 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     std::vector<std::pair<size_t, double>> rehearsal_metadata;
     size_t history_count = 0;
     size_t rehearsal_size = 0;
+
+    int i_batch = 0;
+    std::map<int, metrics_t> metrics;
 
     struct queue_item_t {
         int aug_size = 0;
@@ -83,6 +87,7 @@ public:
     void enable_augmentation(bool state);
     size_t get_rehearsal_size();
     size_t get_history_count();
+    std::vector<double> get_metrics(size_t i_batch);
 };
 
 #endif
