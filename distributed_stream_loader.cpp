@@ -99,12 +99,14 @@ void distributed_stream_loader_t::register_endpoints(const std::map<std::string,
  */
 void distributed_stream_loader_t::async_process() {
     while (true) {
+        // WAITING for data
         std::unique_lock<tl::mutex> lock(request_mutex);
         while (request_queue.empty())
             request_cond.wait(lock);
         auto batch = request_queue.front();
         request_queue.pop_front();
         lock.unlock();
+        metrics[i_batch].accumulate_time = std::chrono::system_clock::now() - metrics[i_batch].last_accumulate_time;
 
         // COPY m into m'
         auto now = std::chrono::system_clock::now();
@@ -119,12 +121,29 @@ void distributed_stream_loader_t::async_process() {
             && R + batch_size == batch.aug_weights.sizes()[0]);
 
         // Initialization of the augmented result
+#ifndef WITHOUT_CUDA
+        ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr(),
+                            batch.samples.data_ptr(),
+                            batch_size * batch.samples[0].nbytes(),
+                            cudaMemcpyHostToDevice
+        ) == cudaSuccess);
+        ASSERT(cudaMemcpy((char *) batch.aug_targets.data_ptr(),
+                            batch.targets.data_ptr(),
+                            batch_size * batch.targets[0].nbytes(),
+                            cudaMemcpyHostToDevice
+        ) == cudaSuccess);
+        for (int i = 0; i < batch_size; i++) {
+            batch.aug_weights.index_put_({i}, 1.0);
+            batch.aug_size = batch_size;
+        }
+#elif
         for (int i = 0; i < batch_size; i++) {
             batch.aug_samples.index_put_({i}, batch.samples[i]);
             batch.aug_targets.index_put_({i}, batch.targets[i]);
             batch.aug_weights.index_put_({i}, 1.0);
             batch.aug_size = batch_size;
         }
+#endif
         metrics[i_batch].batch_copy_time = std::chrono::system_clock::now() - now;
 
         if (augmentation_enabled)
@@ -223,13 +242,13 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         // COPY representatives
         now = std::chrono::system_clock::now();
         ASSERT(k - batch_size <= R);
-        #ifndef WITHOUT_CUDA
+#ifndef WITHOUT_CUDA
         ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
                             buffer->data_ptr(),
                             (k - batch_size) * nbytes,
                             cudaMemcpyHostToDevice
         ) == cudaSuccess);
-        #endif
+#endif
         delete buffer;
         metrics[i_batch].representatives_copy_time = std::chrono::system_clock::now() - now;
     }
@@ -449,6 +468,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
                  const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
+    metrics[i_batch].last_accumulate_time = std::chrono::system_clock::now();
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
         request_cond.wait(lock);
