@@ -11,7 +11,7 @@ engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_i
     server_engine = tl::engine(address, THALLIUM_SERVER_MODE, true, POOL_SIZE, &hii);
 
     std::cout << "Server running at address " << server_engine.self()
-                << " with provider id " << provider_id << ", verbs+cuda support: " << cuda_rdma << std::endl;
+                << " with provider id " << provider_id << ", device registration: " << cuda_rdma << std::endl;
 }
 
 const tl::engine& engine_loader_t::get_engine() const {

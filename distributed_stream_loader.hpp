@@ -44,11 +44,18 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     struct queue_item_t {
         int aug_size = 0;
         torch::Tensor samples, targets, aug_samples, aug_targets, aug_weights;
+        queue_item_t(const torch::Tensor &_samples, const torch::Tensor &_targets) :
+            samples(_samples), targets(_targets) { }
         queue_item_t(const torch::Tensor &_samples, const torch::Tensor &_targets,
                 const torch::Tensor &_aug_samples, const torch::Tensor &_aug_targets, const torch::Tensor &_aug_weights) :
             samples(_samples), targets(_targets), aug_samples(_aug_samples), aug_targets(_aug_targets), aug_weights(_aug_weights) { }
         queue_item_t() { }
     };
+
+    bool use_allocated_variables = false;
+    torch::Tensor alloc_aug_samples;
+    torch::Tensor alloc_aug_targets;
+    torch::Tensor alloc_aug_weights;
 
     std::deque<queue_item_t> request_queue, response_queue;
     tl::mutex request_mutex;
@@ -82,7 +89,10 @@ public:
 
     void accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
             const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
+    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets);
     int wait();
+    void use_these_allocated_variables(const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
+    void copy_last_batch(queue_item_t &batch, int batch_size);
 
     void enable_augmentation(bool state);
     size_t get_rehearsal_size();
