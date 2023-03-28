@@ -214,6 +214,13 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
     std::vector<std::vector<std::pair<void*, std::size_t>>> segments;
     std::vector<tl::bulk> bulks;
 
+    struct hg_bulk_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    if (buffer->is_cuda())
+        attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_CUDA;
+    else
+        attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
+
     // Iterate over nodes and issuing corresponding rpc requests
     int j = k;
     for (const auto& indices : indices_per_node) {
@@ -227,7 +234,7 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         }
 
         tl::provider_handle& ph = provider_handles[indices.first];
-        tl::bulk bulk = get_engine().expose(inserted_segments, tl::bulk_mode::write_only);
+        tl::bulk bulk = get_engine().expose(inserted_segments, tl::bulk_mode::write_only, attr);
         bulks.push_back(std::move(bulk));
 
         auto response = get_samples_procedure.on(ph).async(bulks.back(), indices.second);
