@@ -138,16 +138,16 @@ void distributed_stream_loader_t::async_process() {
 
         i_batch++;
 
-        lock.lock();
-        response_queue.emplace_back(batch);
-        lock.unlock();
-        request_cond.notify_one();
-
         // UPDATE buffer
         now = std::chrono::system_clock::now();
         populate_rehearsal_buffer(batch);
         update_representative_weights(R, batch_size);
         metrics[i_batch].buffer_update_time = std::chrono::system_clock::now() - now;
+
+        lock.lock();
+        response_queue.emplace_back(batch);
+        lock.unlock();
+        request_cond.notify_one();
     }
 }
 
