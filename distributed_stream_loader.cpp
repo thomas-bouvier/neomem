@@ -56,7 +56,9 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
         }
     }
 
-    rehearsal_vector.insert(rehearsal_vector.begin(), K * N * num_samples_per_representative, torch::zeros(representative_shape));
+    auto size = K * N * num_samples_per_representative;
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true);
+    rehearsal_vector.insert(rehearsal_vector.begin(), size, torch::zeros(representative_shape, options));
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 0.0));
     DBG("Distributed buffer memory allocated!");
 }
