@@ -12,8 +12,6 @@
 #include <cuda_runtime.h>
 #endif
 
-#define __DEBUG
-#define __ASSERT
 #include "debug.hpp"
 
 using namespace torch::indexing;
@@ -293,18 +291,6 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         metrics[i_batch].representatives_copy_time = std::chrono::system_clock::now() - now;
     }
 
-    /*
-    TEST:
-    for (int i = 0; i < batch.aug_size; i++) {
-        if (batch.aug_targets[i].item().toInt() != batch.aug_samples[i][0][0][0].item().toInt()) {
-            std::cout << "fail it " << i << std::endl;
-            std::cout << "label " << batch.aug_targets[i].item().toInt() << std::endl;
-            std::cout << "value " << batch.aug_samples[i][0][0][0].item().toInt() << std::endl;
-            ASSERT(false);
-        }
-    }
-    */
-
     return k;
 }
 
@@ -415,10 +401,6 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             representative_t repr;
             for (size_t r = 0; r < num_samples_per_representative; r++) {
                 auto tensor = rehearsal_vector[i * N + rehearsal_repr_of_class_index + r];
-                /*
-                TEST:
-                ASSERT(tensor[0][0][0].item().toInt() == i);
-                */
                 repr.emplace_back(tensor);
             }
 
@@ -466,33 +448,12 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             for (const torch::Tensor& tensor : repr) {
                 ASSERT(tensor.nbytes() != 0);
                 ASSERT(tensor.is_contiguous());
-                /*
-                TEST:
-                ASSERT(label == tensor[0][0][0].item().toInt());
-                DBG("value " << tensor[0][0][0].item().toInt());
-                */
                 segments.emplace_back(tensor.data_ptr(), tensor.nbytes());
             }
         }
     }
     ASSERT(c == segments.size());
     ASSERT(samples.size() == metadata.size());
-
-    /*
-    TEST:
-    int s = 0;
-    DBG("checking if the metadata reflects the segments, iterating on metadata (FAILING)..");
-    for (auto const &it : metadata) {
-        auto label = std::get<0>(it);
-        DBG("for label " << label);
-        for (int num_reps = 0; num_reps < std::get<2>(it); num_reps++) {
-            DBG("num_reps " << num_reps);
-            DBG("value " << torch::from_blob(segments[s].first, representative_shape, torch::kFloat32)[0][0][0].item().toInt());
-            ASSERT(label == torch::from_blob(segments[s].first, representative_shape, torch::kFloat32)[0][0][0].item().toInt());
-            s++;
-        }
-    }
-    */
 
     if (segments.size() > 0) {
         tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);

@@ -1,5 +1,8 @@
 - .git
-- *.txt
 - *.so
+- *.cmake
 - vgcore*
 - .ccls-cache
+- CMakeFiles
+- CMakeCache.txt
+- Makefile
