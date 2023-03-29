@@ -7,7 +7,6 @@ option(WITHOUT_CUDA "Disable CUDA support" OFF)
 
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
 include_directories(${Python_INCLUDE_DIRS})
-link_directories(${Python_LIBRARY_DIRS})
 
 # Find pybind11Config.cmake
 execute_process(COMMAND ${PYTHON_EXECUTABLE} -c "import pybind11; print(pybind11.get_cmake_dir())"
@@ -18,12 +17,19 @@ set(pybind11_DIR ${CUSTOM_PYTHON_PYBIND11_PATH})
 
 find_package(pybind11 CONFIG REQUIRED)
 include_directories(${pybind11_INCLUDE_DIR})
-link_directories(${pybind11_LIB_DIR})
 
 # Pytorch
+execute_process(
+  COMMAND python -c "import torch; import os; print(os.path.dirname(torch.__file__), end='')"
+  OUTPUT_VARIABLE TORCH_PATH
+)
+list(APPEND CMAKE_PREFIX_PATH ${TORCH_PATH})
+
+# https://github.com/pytorch/pytorch/issues/38122
+set(TORCH_PYTHON_LIBRARIES "${TORCH_PATH}/lib/libtorch_python.so")
+
 find_package(Torch REQUIRED)
 include_directories(${TORCH_INCLUDE_DIRS})
-link_directories(${TORCH_LIB_DIR})
 
 find_package(MPI REQUIRED)
 include_directories(${MPI_INCLUDE_PATH})

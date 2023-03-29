@@ -6,7 +6,7 @@
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(rehearsal, m) {
+PYBIND11_MODULE(neomem, m) {
     m.doc() = "Neomem: pybind11 based streaming rehearsal buffer";
 
     py::class_<engine_loader_t>(m, "EngineLoader")
