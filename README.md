@@ -2,7 +2,7 @@
 
 C++ data loader with rehearsal for Torch. Based on PyBind11 and [Mochi](https://www.mcs.anl.gov/research/projects/mochi/).
 
-## Environment
+## Building
 
 ### Requirements
 
@@ -13,13 +13,19 @@ C++ data loader with rehearsal for Torch. Based on PyBind11 and [Mochi](https://
 - libfabric built with CUDA support
 - Thallium
 
-### Providers
+If these dependencies are installed inside a Spack environment, don't forget to `activate` it before building Neomem.
 
-#### Verbs
+### Compiling Neomem using CMake
+
+
+
+## Providers
+
+### Verbs
 
 If using provider `verbs`, make sure IPoIB is enabled and that an interface appears as `UP` when running `ip link show`.
 
-#### RDMA+CUDA
+### RDMA+CUDA
 
 Device registration should be enabled. To use RDMA+CUDA, your only options are providers `ofi+shm` (shared-memory provider from libfabric, which supports gdr copy) and `verbs`.
 

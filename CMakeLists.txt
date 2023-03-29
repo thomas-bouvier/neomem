@@ -9,9 +9,21 @@ find_package(Python COMPONENTS Interpreter Development REQUIRED)
 include_directories(${Python_INCLUDE_DIRS})
 link_directories(${Python_LIBRARY_DIRS})
 
-find_package(PythonLibs REQUIRED)
+# Find pybind11Config.cmake
+execute_process(COMMAND ${PYTHON_EXECUTABLE} -c "import pybind11; print(pybind11.get_cmake_dir())"
+    OUTPUT_VARIABLE CUSTOM_PYTHON_PYBIND11_PATH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+set(pybind11_DIR ${CUSTOM_PYTHON_PYBIND11_PATH})
 
+find_package(pybind11 CONFIG REQUIRED)
+include_directories(${pybind11_INCLUDE_DIR})
+link_directories(${pybind11_LIB_DIR})
+
+# Pytorch
 find_package(Torch REQUIRED)
+include_directories(${TORCH_INCLUDE_DIRS})
+link_directories(${TORCH_LIB_DIR})
 
 find_package(MPI REQUIRED)
 include_directories(${MPI_INCLUDE_PATH})
@@ -32,7 +44,6 @@ add_definitions(
   -Wall
   -fPIC
   -Wl,--no-as-needed
-  -D_GLIBCXX_USE_CXX11_ABI=${WITH_ABI}
   -D__ASSERT
   -D__DEBUG
 )
