@@ -105,6 +105,7 @@ void distributed_stream_loader_t::async_process() {
         while (request_queue.empty())
             request_cond.wait(lock);
         auto batch = request_queue.front();
+        batch.aug_size = 0;
         request_queue.pop_front();
         lock.unlock();
         metrics[i_batch].accumulate_time = std::chrono::system_clock::now() - metrics[i_batch].last_accumulate_time;
@@ -154,27 +155,28 @@ void distributed_stream_loader_t::async_process() {
 void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch_size) {
 /*
 #ifndef WITHOUT_CUDA
-        ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr(),
-                            batch.samples.data_ptr(),
-                            batch_size * batch.samples[0].nbytes(),
-                            cudaMemcpyDeviceToDevice
-        ) == cudaSuccess);
-        ASSERT(cudaMemcpy((char *) batch.aug_targets.data_ptr(),
-                            batch.targets.data_ptr(),
-                            batch_size * batch.targets[0].nbytes(),
-                            cudaMemcpyDeviceToDevice
-        ) == cudaSuccess);
-        for (int i = 0; i < batch_size; i++) {
-            batch.aug_weights.index_put_({i}, 1.0);
-        }
+    ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr(),
+                        batch.samples.data_ptr(),
+                        batch_size * batch.samples[0].nbytes(),
+                        cudaMemcpyDeviceToDevice
+    ) == cudaSuccess);
+    ASSERT(cudaMemcpy((char *) batch.aug_targets.data_ptr(),
+                        batch.targets.data_ptr(),
+                        batch_size * batch.targets[0].nbytes(),
+                        cudaMemcpyDeviceToDevice
+    ) == cudaSuccess);
+    for (int i = 0; i < batch_size; i++) {
+        batch.aug_weights.index_put_({i}, 1.0);
+    }
 #elif
 */
-        for (int i = 0; i < batch_size; i++) {
-            batch.aug_samples.index_put_({i}, batch.samples[i]);
-            batch.aug_targets.index_put_({i}, batch.targets[i]);
-            batch.aug_weights.index_put_({i}, 1.0);
-        }
+    for (int i = 0; i < batch_size; i++) {
+        batch.aug_samples.index_put_({i}, batch.samples[i]);
+        batch.aug_targets.index_put_({i}, batch.targets[i]);
+        batch.aug_weights.index_put_({i}, 1.0);
+    }
 //#endif
+    batch.aug_size = batch_size;
 }
 
 int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
@@ -245,11 +247,6 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
 
     // SAMPLE globally
     now = std::chrono::system_clock::now();
-    if (use_allocated_variables) {
-        batch.aug_size = 0;
-    } else {
-        batch.aug_size = batch_size;
-    }
     // Waiting for rpc requests to resolve
     for (size_t i = 0; i < indices_per_node.size(); i++) {
         decltype(responses.begin()) completed;
