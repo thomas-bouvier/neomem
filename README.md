@@ -2,7 +2,7 @@
 
 C++ data loader with rehearsal for Torch. Based on PyBind11 and [Mochi](https://www.mcs.anl.gov/research/projects/mochi/).
 
-## Building
+## Usage
 
 ### Requirements
 
@@ -20,6 +20,12 @@ If these dependencies are installed inside a Spack environment, don't forget to 
 ```console
 cmake . -DPython_EXECUTABLE=/path/to/spack-env/view/bin/python -DWITHOUT_CUDA=0
 make
+```
+
+### Using Neomem in your Python project
+
+```python
+import neomem
 ```
 
 ## Providers

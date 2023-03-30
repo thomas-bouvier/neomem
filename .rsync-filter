@@ -1,4 +1,5 @@
 - .git
+- neomem_example
 - *.so
 - *.cmake
 - vgcore*
