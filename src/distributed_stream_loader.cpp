@@ -51,7 +51,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
         }
     }
 
-    init_rehearsal_buffers(false);
+    init_rehearsal_buffers(true);
 }
 
 /**
@@ -113,6 +113,7 @@ void distributed_stream_loader_t::start() {
     async_thread = es->make_thread([this]() {
         async_process();
     });
+    started = true;
 }
 
 /**
@@ -121,7 +122,7 @@ void distributed_stream_loader_t::start() {
  * the response_queue (which will be consumed in turn by wait()).
  */
 void distributed_stream_loader_t::async_process() {
-    get_receiving_rpc_buffer(client_buffer, client_bulk);
+    expose_memory(client_segments, client_buffer, client_bulk);
 
     while (true) {
         // WAITING for data
@@ -153,7 +154,7 @@ void distributed_stream_loader_t::async_process() {
         metrics[i_batch].batch_copy_time = std::chrono::system_clock::now() - now;
 
         if (augmentation_enabled)
-            augment_batch(batch, R);
+            augment_batch(batch, batch_size);
 
         i_batch++;
 
@@ -179,7 +180,7 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch
     ) == cudaSuccess);
     ASSERT(cudaMemcpy((char *) batch.aug_targets.data_ptr(),
                         batch.targets.data_ptr(),
-                        batch_size * num_bytes_per_representative,
+                        batch_size * batch.targets[0].nbytes(),
                         cudaMemcpyDeviceToDevice
     ) == cudaSuccess);
 #else
@@ -200,7 +201,7 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch
  * - in the best case, to an once-allocated variable from Python
  + - 
  */
-void distributed_stream_loader_t::get_receiving_rpc_buffer(torch::Tensor* buffer, tl::bulk& bulk) {
+void distributed_stream_loader_t::expose_memory(std::vector<std::pair<void*, std::size_t>>& segments, torch::Tensor* buffer, tl::bulk& bulk) {
     if (use_allocated_variables) {
         if (!engine_loader.is_cuda_rdma_enabled() && alloc_aug_samples.is_cuda())
             throw std::invalid_argument("The augmented mini-batch is stored in CUDA memory, allocated policy is selected, but cuda+verbs is not supported");
@@ -210,11 +211,10 @@ void distributed_stream_loader_t::get_receiving_rpc_buffer(torch::Tensor* buffer
     } else {
         auto shape = representative_shape;
         shape.insert(shape.begin(), R);
-        auto options = torch::TensorOptions().dtype(torch::kFloat32);
+        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
 #ifndef WITHOUT_CUDA
-        options = options.device(torch::kCUDA);
-#else
-        options = options.device(torch::kCPU);
+        if (engine_loader.is_cuda_rdma_enabled())
+            options = options.device(torch::kCUDA);
 #endif
         buffer = new torch::Tensor(torch::zeros(shape, options));
     }
@@ -226,8 +226,8 @@ void distributed_stream_loader_t::get_receiving_rpc_buffer(torch::Tensor* buffer
     else
         attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
 
-    std::vector<std::pair<void*, std::size_t>> segments(1);
-    segments[0].first  = (char *) buffer->data_ptr();
+    segments.resize(1);
+    segments[0].first = (char *) buffer->data_ptr();
     segments[0].second = R * num_samples_per_representative * num_bytes_per_representative;
     bulk = get_engine().expose(segments, tl::bulk_mode::write_only, attr);
 }
@@ -235,7 +235,7 @@ void distributed_stream_loader_t::get_receiving_rpc_buffer(torch::Tensor* buffer
 /**
  *
  */
-int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
+int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_size) {
     std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
 
     // PREPARE bulk
@@ -248,7 +248,7 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
         auto response = get_samples_procedure.on(ph).async(client_bulk, indices.second, j);
         responses.push_back(std::move(response));
 
-        j += indices.second.size() * num_samples_per_representative;
+        j += indices.second.size() * num_samples_per_representative * num_bytes_per_representative;
     }
     ASSERT(responses.size() == indices_per_node.size());
     metrics[i_batch].bulk_prepare_time = std::chrono::system_clock::now() - now;
@@ -281,22 +281,27 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int R) {
     metrics[i_batch].rpcs_resolve_time = std::chrono::system_clock::now() - now;
 
     if (!use_allocated_variables)
-        copy_exposed_buffer_to_aug_batch();
+        copy_exposed_buffer_to_aug_batch(batch, batch_size);
 
     return -1;
 }
 
-void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch() {
-    // We should copy from the exposed bulk to the minibatch
+/**
+ * We should copy from the exposed bulk to the minibatch
+ */
+void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size) {
     if (!use_allocated_variables) {
         // COPY representatives
         auto now = std::chrono::system_clock::now();
 #ifndef WITHOUT_CUDA
         ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * num_bytes_per_representative,
-                            buffer->data_ptr(),
+                            client_buffer->data_ptr(),
                             (batch.aug_size - batch_size) * num_bytes_per_representative,
                             cudaMemcpyHostToDevice
         ) == cudaSuccess);
+#else
+    for (int i = batch_size; i < batch.aug_size - batch_size; i++)
+        batch.aug_samples.index_put_({i}, client_buffer[i - batch_size]);
 #endif
         metrics[i_batch].representatives_copy_time = std::chrono::system_clock::now() - now;
     }
@@ -481,6 +486,9 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
  * asynchronous fashion.
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets) {
+    if (!started)
+        throw std::runtime_error("Call start() before accumulate()");
+
     metrics[i_batch].last_accumulate_time = std::chrono::system_clock::now();
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
@@ -497,6 +505,9 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
                  const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
+    if (!started)
+        throw std::runtime_error("Call start() before accumulate()");
+
     metrics[i_batch].last_accumulate_time = std::chrono::system_clock::now();
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)

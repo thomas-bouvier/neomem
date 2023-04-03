@@ -41,6 +41,8 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     int i_batch = 0;
     std::map<int, metrics_t> metrics;
 
+    bool started = false;
+
     struct queue_item_t {
         int aug_size = 0;
         torch::Tensor samples, targets, aug_samples, aug_targets, aug_weights;
@@ -52,6 +54,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
         queue_item_t() { }
     };
 
+    std::vector<std::pair<void*, std::size_t>> client_segments;
     torch::Tensor* client_buffer;
     tl::bulk client_bulk;
 
@@ -76,8 +79,8 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
 
     void async_process();
 
-    int augment_batch(queue_item_t &batch, int num_representatives);
-    void copy_exposed_buffer_to_aug_batch();
+    int augment_batch(queue_item_t &batch, int batch_size);
+    void copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size);
     void populate_rehearsal_buffer(const queue_item_t& batch);
     void update_representative_weights(int num_representatives, int batch_size);
 
@@ -101,7 +104,7 @@ public:
     int wait();
 
     void use_these_allocated_variables(const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
-    void get_receiving_rpc_buffer(torch::Tensor* buffer, tl::bulk& bulk);
+    void expose_memory(std::vector<std::pair<void*, std::size_t>>& segments, torch::Tensor* buffer, tl::bulk& bulk);
     void copy_last_batch(queue_item_t &batch, int batch_size);
 
     void enable_augmentation(bool state);
