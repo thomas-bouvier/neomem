@@ -47,9 +47,10 @@ int main(int argc, char** argv) {
     }
 
     engine_loader_t engine(server_address, server_id);
-    distributed_stream_loader_t dsl(engine, Classification, K, N, C, seed, 1, {3, 224, 224}, discover_endpoints, true);
+    distributed_stream_loader_t dsl(engine, Classification, K, N, R, C, seed, 1, {3, 224, 224}, discover_endpoints, true);
     dsl.register_endpoints(endpoints);
     dsl.enable_augmentation(true);
+    dsl.start();
 
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
     torch::Tensor aug_samples = torch::zeros({N + R, 3, 224, 224}, options);

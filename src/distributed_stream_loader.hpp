@@ -27,9 +27,9 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     engine_loader_t engine_loader;
 
     Task task_type;
-    unsigned int K, N, C;
+    unsigned int K, N, R, C;
     std::default_random_engine rand_gen;
-    unsigned int num_samples_per_representative;
+    unsigned int num_samples_per_representative, num_bytes_per_representative;
     std::vector<long> representative_shape;
     bool cuda_rdma, verbose;
 
@@ -52,6 +52,9 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
         queue_item_t() { }
     };
 
+    torch::Tensor* client_buffer;
+    tl::bulk client_bulk;
+
     bool use_allocated_variables = false;
     torch::Tensor alloc_aug_samples;
     torch::Tensor alloc_aug_targets;
@@ -68,30 +71,37 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     std::vector<tl::provider_handle> provider_handles;
     tl::remote_procedure get_samples_procedure;
 
+    std::map<std::string, int> gather_endpoints() const;
+    void init_rehearsal_buffers(bool pin_buffers);
+
+    void async_process();
+
     int augment_batch(queue_item_t &batch, int num_representatives);
+    void copy_exposed_buffer_to_aug_batch();
     void populate_rehearsal_buffer(const queue_item_t& batch);
     void update_representative_weights(int num_representatives, int batch_size);
 
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
-    void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices);
-    std::map<std::string, int> gather_endpoints() const;
+    void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices, int offset);
 
 public:
     distributed_stream_loader_t(const engine_loader_t& engine, Task _task_type,
-        unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
+        unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
         unsigned int _num_samples_per_representative,
         std::vector<long> _representative_shape,
         bool discover_endpoints = false, bool _verbose = false);
     ~distributed_stream_loader_t();
 
     void register_endpoints(const std::map<std::string, int>& endpoints);
-    void async_process();
+    void start();
 
     void accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
             const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
     void accumulate(const torch::Tensor &samples, const torch::Tensor &targets);
     int wait();
+
     void use_these_allocated_variables(const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
+    void get_receiving_rpc_buffer(torch::Tensor* buffer, tl::bulk& bulk);
     void copy_last_batch(queue_item_t &batch, int batch_size);
 
     void enable_augmentation(bool state);
