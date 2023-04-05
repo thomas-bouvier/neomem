@@ -3,6 +3,8 @@
 #include <tuple>
 
 #include "distributed_stream_loader.hpp"
+#include "debug.hpp"
+#define ___ASSERT
 
 unsigned int K = 10;
 unsigned int N = 10;
@@ -71,6 +73,17 @@ int main(int argc, char** argv) {
         dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
         int size = dsl.wait();
         std::cout << "Received " << size - N << std::endl;
+
+        /*
+        for (int j = 0; j < size; j++) {
+            if (j < N) {
+                ASSERT(torch::equal(aug_samples[j], torch::full({3, 224, 224}, i, options)));
+            } else {
+                //std::cout << aug_samples[j] << std::endl;
+                ASSERT(!torch::equal(aug_samples[j], torch::zeros({3, 224, 224}, options)));
+            }
+        }
+        */
     }
 
     return 0;

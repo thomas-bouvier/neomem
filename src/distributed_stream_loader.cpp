@@ -122,7 +122,7 @@ void distributed_stream_loader_t::start() {
  * the response_queue (which will be consumed in turn by wait()).
  */
 void distributed_stream_loader_t::async_process() {
-    expose_memory(client_segments, client_buffer, client_bulk);
+    expose_memory(client_mem);
 
     while (true) {
         // WAITING for data
@@ -184,10 +184,14 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch
                         cudaMemcpyDeviceToDevice
     ) == cudaSuccess);
 #else
-    for (int i = 0; i < batch_size; i++) {
-        batch.aug_samples.index_put_({i}, batch.samples[i]);
-        batch.aug_targets.index_put_({i}, batch.targets[i]);
-    }
+    std::memcpy((char *) batch.aug_samples.data_ptr(),
+                batch.samples.data_ptr(),
+                batch_size * num_bytes_per_representative
+    );
+    std::memcpy((char *) batch.aug_targets.data_ptr(),
+                batch.targets.data_ptr(),
+                batch_size * batch.targets[0].nbytes()
+    );
 #endif
 
     for (int i = 0; i < batch_size; i++)
@@ -201,35 +205,32 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch
  * - in the best case, to an once-allocated variable from Python
  + - 
  */
-void distributed_stream_loader_t::expose_memory(std::vector<std::pair<void*, std::size_t>>& segments, torch::Tensor* buffer, tl::bulk& bulk) {
+void distributed_stream_loader_t::expose_memory(exposed_memory_t &mem) {
     if (use_allocated_variables) {
         if (!engine_loader.is_cuda_rdma_enabled() && alloc_aug_samples.is_cuda())
             throw std::invalid_argument("The augmented mini-batch is stored in CUDA memory, allocated policy is selected, but cuda+verbs is not supported");
 
-        // should be done only once
-        buffer = &alloc_aug_samples;
+        mem.buffer = &alloc_aug_samples;
     } else {
-        auto shape = representative_shape;
-        shape.insert(shape.begin(), R);
         auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
 #ifndef WITHOUT_CUDA
         if (engine_loader.is_cuda_rdma_enabled())
             options = options.device(torch::kCUDA);
 #endif
-        buffer = new torch::Tensor(torch::zeros(shape, options));
+        auto shape = representative_shape;
+        shape.insert(shape.begin(), R);
+        mem.buffer = new torch::Tensor(torch::ones(shape, options));
     }
 
     struct hg_bulk_attr attr;
     memset(&attr, 0, sizeof(attr));
-    if (buffer->is_cuda())
+    if (mem.buffer->is_cuda())
         attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_CUDA;
     else
         attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
 
-    segments.resize(1);
-    segments[0].first = (char *) buffer->data_ptr();
-    segments[0].second = R * num_samples_per_representative * num_bytes_per_representative;
-    bulk = get_engine().expose(segments, tl::bulk_mode::write_only, attr);
+    mem.segments.emplace_back(mem.buffer->data_ptr(), R * num_samples_per_representative * num_bytes_per_representative);
+    mem.bulk = get_engine().expose(mem.segments, tl::bulk_mode::write_only, attr);
 }
 
 /**
@@ -245,7 +246,7 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_si
     std::vector<tl::async_response> responses;
     for (const auto& indices : indices_per_node) {
         tl::provider_handle& ph = provider_handles[indices.first];
-        auto response = get_samples_procedure.on(ph).async(client_bulk, indices.second, j);
+        auto response = get_samples_procedure.on(ph).async(client_mem.bulk, indices.second, j);
         responses.push_back(std::move(response));
 
         j += indices.second.size() * num_samples_per_representative * num_bytes_per_representative;
@@ -290,18 +291,22 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_si
  * We should copy from the exposed bulk to the minibatch
  */
 void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size) {
+    auto nbytes = num_samples_per_representative * num_bytes_per_representative;
+
     if (!use_allocated_variables) {
         // COPY representatives
         auto now = std::chrono::system_clock::now();
 #ifndef WITHOUT_CUDA
-        ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * num_bytes_per_representative,
-                            client_buffer->data_ptr(),
-                            (batch.aug_size - batch_size) * num_bytes_per_representative,
+        ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
+                            client_mem.buffer->data_ptr(),
+                            (batch.aug_size - batch_size) * nbytes,
                             cudaMemcpyHostToDevice
         ) == cudaSuccess);
 #else
-    for (int i = batch_size; i < batch.aug_size - batch_size; i++)
-        batch.aug_samples.index_put_({i}, client_buffer[i - batch_size]);
+    std::memcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
+                client_mem.buffer->data_ptr(),
+                (batch.aug_size - batch_size) * nbytes
+    );
 #endif
         metrics[i_batch].representatives_copy_time = std::chrono::system_clock::now() - now;
     }
@@ -380,7 +385,7 @@ void distributed_stream_loader_t::update_representative_weights(int num_represen
     }
 }
 
-void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& client_bulk, const std::vector<int>& indices, int offset) {
+void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices, int offset) {
     size_t c = 0;
     rehearsal_map_t samples;
 
@@ -474,7 +479,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     if (segments.size() > 0) {
         tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);
         auto size = c * num_samples_per_representative * num_bytes_per_representative;
-        bulk(0, size) >> client_bulk(offset, size).on(req.get_endpoint());
+        bulk >> b(offset, size).on(req.get_endpoint());
     }
 
     req.respond(metadata);

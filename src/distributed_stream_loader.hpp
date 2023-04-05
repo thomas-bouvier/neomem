@@ -54,9 +54,13 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
         queue_item_t() { }
     };
 
-    std::vector<std::pair<void*, std::size_t>> client_segments;
-    torch::Tensor* client_buffer;
-    tl::bulk client_bulk;
+    struct exposed_memory_t {
+        std::vector<std::pair<void*, std::size_t>> segments;
+        torch::Tensor* buffer;
+        tl::bulk bulk;
+
+        exposed_memory_t() { }
+    };
 
     bool use_allocated_variables = false;
     torch::Tensor alloc_aug_samples;
@@ -87,6 +91,8 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
     void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices, int offset);
 
+    exposed_memory_t client_mem;
+
 public:
     distributed_stream_loader_t(const engine_loader_t& engine, Task _task_type,
         unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
@@ -104,7 +110,7 @@ public:
     int wait();
 
     void use_these_allocated_variables(const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
-    void expose_memory(std::vector<std::pair<void*, std::size_t>>& segments, torch::Tensor* buffer, tl::bulk& bulk);
+    void expose_memory(exposed_memory_t &mem);
     void copy_last_batch(queue_item_t &batch, int batch_size);
 
     void enable_augmentation(bool state);
