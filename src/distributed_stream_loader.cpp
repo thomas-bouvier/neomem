@@ -261,9 +261,7 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_s
     now = std::chrono::system_clock::now();
     // Waiting for rpc requests to resolve
     for (size_t i = 0; i < indices_per_node.size(); i++) {
-        decltype(responses.begin()) completed;
-        std::vector<std::tuple<int, double, size_t>> metadata = tl::async_response::wait_any(responses.begin(), responses.end(), completed);
-        responses.erase(completed);
+        std::vector<std::tuple<int, double, size_t>> metadata = responses[i].wait();
 
         for (const auto &it : metadata) {
             int label;
