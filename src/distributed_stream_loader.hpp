@@ -33,7 +33,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     std::vector<long> representative_shape;
     bool cuda_rdma, verbose;
 
-    std::vector<torch::Tensor> rehearsal_vector;
+    torch::Tensor* rehearsal_tensor = nullptr;
     std::vector<std::pair<size_t, double>> rehearsal_metadata;
     size_t history_count = 0;
     size_t rehearsal_size = 0;
@@ -56,7 +56,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
 
     struct exposed_memory_t {
         std::vector<std::pair<void*, std::size_t>> segments;
-        torch::Tensor* buffer;
+        torch::Tensor* buffer = nullptr;
         tl::bulk bulk;
 
         exposed_memory_t() { }
@@ -83,7 +83,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
 
     void async_process();
 
-    int augment_batch(queue_item_t &batch, int batch_size);
+    void augment_batch(queue_item_t &batch, int batch_size);
     void copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size);
     void populate_rehearsal_buffer(const queue_item_t& batch);
     void update_representative_weights(int num_representatives, int batch_size);

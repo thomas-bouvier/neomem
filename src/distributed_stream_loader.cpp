@@ -38,6 +38,8 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
         representative_shape(_representative_shape), verbose(_verbose) {
     num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
 
+    init_rehearsal_buffers(true);
+
     define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
     get_samples_procedure = get_engine().define("get_samples");
@@ -50,8 +52,6 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
             register_endpoints(all_endpoints);
         }
     }
-
-    init_rehearsal_buffers(true);
 }
 
 /**
@@ -99,7 +99,10 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
         throw std::invalid_argument("Pinning the rehearsal buffer requires CUDA");
 #endif
 
-    rehearsal_vector.insert(rehearsal_vector.begin(), size, torch::zeros(representative_shape, options));
+    auto rehearsal_shape = representative_shape;
+    rehearsal_shape.insert(rehearsal_shape.begin(), size);
+    rehearsal_tensor = new torch::Tensor(torch::empty(rehearsal_shape, options));
+    ASSERT(rehearsal_tensor->is_contiguous());
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 0.0));
     DBG("Distributed buffer memory allocated!");
 }
@@ -236,7 +239,7 @@ void distributed_stream_loader_t::expose_memory(exposed_memory_t &mem) {
 /**
  *
  */
-int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_size) {
+void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_size) {
     std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
 
     // PREPARE bulk
@@ -283,8 +286,6 @@ int distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_si
 
     if (!use_allocated_variables)
         copy_exposed_buffer_to_aug_batch(batch, batch_size);
-
-    return -1;
 }
 
 /**
@@ -363,11 +364,9 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         if (index < N) {
             for (size_t r = 0; r < num_samples_per_representative; r++) {
                 //TODO reconstruction
-                torch::Tensor tensor = batch.samples.index({i}).detach().clone().to(torch::kCPU);
-                ASSERT(tensor.nbytes() != 0);
-                auto j = N * label + index + r;
+                int j = N * label + index + r;
                 ASSERT(j < K * N * num_samples_per_representative);
-                rehearsal_vector[j] = tensor;
+                rehearsal_tensor->index_put_({j}, batch.samples.index({i}));
             }
             if (index >= rehearsal_metadata[label].first) {
                 rehearsal_size++;
@@ -421,7 +420,8 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             const size_t rehearsal_repr_of_class_index = (index % N) % rehearsal_metadata[i].first;
             representative_t repr;
             for (size_t r = 0; r < num_samples_per_representative; r++) {
-                auto tensor = rehearsal_vector[i * N + rehearsal_repr_of_class_index + r];
+                int index = i * N + rehearsal_repr_of_class_index + r;
+                auto tensor = rehearsal_tensor->index({index});
                 repr.emplace_back(tensor);
             }
 
