@@ -15,10 +15,6 @@ namespace tl = thallium;
 
 enum Task { Classification, Reconstruction };
 
-typedef std::vector<torch::Tensor> representative_t;
-typedef std::vector<representative_t> representative_collection_t;
-typedef std::unordered_map<int, std::pair<double, representative_collection_t>> rehearsal_map_t;
-
 
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
     const size_t MAX_QUEUE_SIZE = 1024;
@@ -91,7 +87,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
     void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices, int offset);
 
-    exposed_memory_t client_mem;
+    exposed_memory_t client_mem, server_mem;
 
 public:
     distributed_stream_loader_t(const engine_loader_t& engine, Task _task_type,

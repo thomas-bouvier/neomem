@@ -105,6 +105,12 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
     ASSERT(rehearsal_tensor->is_contiguous());
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 0.0));
     DBG("Distributed buffer memory allocated!");
+
+    auto shape = representative_shape;
+    shape.insert(shape.begin(), R);
+    server_mem.buffer = new torch::Tensor(torch::empty(shape, options));
+    server_mem.segments.emplace_back(server_mem.buffer->data_ptr(), R * num_samples_per_representative * num_bytes_per_representative);
+    server_mem.bulk = get_engine().expose(server_mem.segments, tl::bulk_mode::read_only);
 }
 
 /**
@@ -343,6 +349,8 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
 }
 
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
+    std::unique_lock<tl::mutex> lock(rehearsal_mutex);
+
     auto batch_size = batch.samples.sizes()[0];
     std::uniform_int_distribution<unsigned int> dice(0, batch_size - 1);
     for (int i = 0; i < batch_size; i++) {
@@ -352,7 +360,6 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         if (task_type == Classification)
             label = batch.targets[i].item<int>();
 
-        std::unique_lock<tl::mutex> lock(rehearsal_mutex);
         size_t index = -1;
         if (rehearsal_metadata[label].first < N)
             index = rehearsal_metadata[label].first;
@@ -362,9 +369,9 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         if (index < N) {
             for (size_t r = 0; r < num_samples_per_representative; r++) {
                 //TODO reconstruction
-                int j = N * label + index + r;
+                size_t j = N * label + index + r;
                 ASSERT(j < K * N * num_samples_per_representative);
-                rehearsal_tensor->index_put_({j}, batch.samples.index({i}));
+                rehearsal_tensor->index_put_({static_cast<int>(j)}, batch.samples.index({i}));
             }
             if (index >= rehearsal_metadata[label].first) {
                 rehearsal_size++;
@@ -383,8 +390,8 @@ void distributed_stream_loader_t::update_representative_weights(int num_represen
 }
 
 void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices, int offset) {
-    size_t c = 0;
-    rehearsal_map_t samples;
+    int c = 0, o = 0;
+    std::vector<std::tuple<size_t, double, std::vector<int>>> samples;
 
     /**
     * Input
@@ -392,10 +399,10 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     *
     * Output
     * Rehearsal buffer, unordered map indexed by labels
-    * - (label1, (weight, reprs))
-    * - (label2, (weight, reprs))
-    * If a representative is already present for a label, the representative is
-    * appended to reprs.
+    * - (label1, weight, reprs_indices)
+    * - (label2, weight, reprs_indices)
+    * If a representative is already present for a label, the representative
+    * index is appended to repr_indices.
     **/
     if (rehearsal_size > 0) {
         for (auto index : indices) {
@@ -416,16 +423,16 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
             }
 
             const size_t rehearsal_repr_of_class_index = (index % N) % rehearsal_metadata[i].first;
-            representative_t repr;
-            for (size_t r = 0; r < num_samples_per_representative; r++) {
-                int index = i * N + rehearsal_repr_of_class_index + r;
-                auto tensor = rehearsal_tensor->index({index});
-                repr.emplace_back(tensor);
+
+            if (std::none_of(samples.begin(), samples.end(), [&](const auto& el) { return std::get<0>(el) == i; })) {
+                samples.emplace_back(i, rehearsal_metadata[i].second, std::vector<int>{});
+            }
+            for (auto& el : samples) {
+                if (std::get<0>(el) == i) {
+                    std::get<2>(el).push_back(i * N + rehearsal_repr_of_class_index);
+                }
             }
 
-            auto weight = rehearsal_metadata[i].second;
-            samples[i].first = weight;
-            samples[i].second.emplace_back(repr);
             c++;
         }
     }
@@ -433,7 +440,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     if (verbose) {
         std::cout << "Sending " << c << "/" << indices.size()  << " representatives from "
             << samples.size() << " different classes to remote node (endpoint: "
-            << req.get_endpoint() << ")" << std::endl;
+            << req.get_endpoint() << ", writing at offset " << offset << ")" << std::endl;
     }
 
     /**
@@ -441,8 +448,8 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     *
     * Input
     * Rehearsal buffer, unordered map indexed by labels
-    * - (label1, (weight, reprs))
-    * - (label2, (weight, reprs))
+    * - (label1, weight, reprs_indices)
+    * - (label2, weight, reprs_indices)
     *
     *
     * Output
@@ -452,32 +459,28 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     * - {(ptrrepA, nbytesA) (ptrrepB, nbytesB) (ptrrepC, nbytesC) (ptrrepD, nbytesD)}
     *
     * repA and repB are of label1, repC and repD are of label2
-    * TODO: complete this comment to explain how representatives are expanded
     **/
-    std::vector<std::tuple<int, double, size_t>> metadata;
-    std::vector<std::pair<void*, size_t>> segments;
-    for (const auto &it : samples) {
-        auto label = it.first;
-        auto weight = it.second.first;
-        const representative_collection_t& reprs = it.second.second;
-        metadata.emplace_back(std::make_tuple(label, weight, reprs.size()));
+    std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
-        for (const representative_t& repr : reprs) {
-            ASSERT(repr.size() == num_samples_per_representative);
-            for (const torch::Tensor& tensor : repr) {
-                ASSERT(tensor.nbytes() != 0);
-                ASSERT(tensor.is_contiguous());
-                segments.emplace_back(tensor.data_ptr(), tensor.nbytes());
-            }
+    std::vector<std::tuple<int, double, size_t>> metadata;
+    for (const auto &el : samples) {
+        int label;
+        double weight;
+        std::vector<int> reprs_indices;
+        std::tie(label, weight, reprs_indices) = el;
+        metadata.emplace_back(std::make_tuple(label, weight, reprs_indices.size()));
+
+        for (size_t i = 0; i < reprs_indices.size(); i++) {
+            server_mem.buffer->index_put_({o}, rehearsal_tensor->index({reprs_indices[i]}));
+            o++;
         }
     }
-    ASSERT(c == segments.size());
+    ASSERT(c == o);
     ASSERT(samples.size() == metadata.size());
 
-    if (segments.size() > 0) {
-        tl::bulk bulk = get_engine().expose(segments, tl::bulk_mode::read_only);
+    if (c > 0) {
         auto size = c * num_samples_per_representative * num_bytes_per_representative;
-        bulk >> b(offset, size).on(req.get_endpoint());
+        server_mem.bulk(0, size) >> b(offset, size).on(req.get_endpoint());
     }
 
     req.respond(metadata);

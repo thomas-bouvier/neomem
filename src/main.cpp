@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
     dsl.start();
 
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    torch::Tensor aug_samples = torch::zeros({N + R, 3, 224, 224}, options);
+    torch::Tensor aug_samples = torch::full({N + R, 3, 224, 224}, -1, options);
     torch::Tensor aug_labels = torch::randint(K, {N + R}, options);
     torch::Tensor aug_weights = torch::zeros({N + R}, options);
 
@@ -74,16 +74,13 @@ int main(int argc, char** argv) {
         int size = dsl.wait();
         std::cout << "Received " << size - N << std::endl;
 
-        /*
         for (int j = 0; j < size; j++) {
             if (j < N) {
                 ASSERT(torch::equal(aug_samples[j], torch::full({3, 224, 224}, i, options)));
             } else {
-                //std::cout << aug_samples[j] << std::endl;
-                ASSERT(!torch::equal(aug_samples[j], torch::zeros({3, 224, 224}, options)));
+                ASSERT(!torch::equal(aug_samples[j], torch::full({3, 224, 224}, -1, options)));
             }
         }
-        */
     }
 
     return 0;
