@@ -3,6 +3,8 @@
 #include <tuple>
 
 #include "distributed_stream_loader.hpp"
+#include "debug.hpp"
+#define ___ASSERT
 
 unsigned int K = 10;
 unsigned int N = 10;
@@ -47,12 +49,13 @@ int main(int argc, char** argv) {
     }
 
     engine_loader_t engine(server_address, server_id);
-    distributed_stream_loader_t dsl(engine, Classification, K, N, C, seed, 1, {3, 224, 224}, discover_endpoints, true);
+    distributed_stream_loader_t dsl(engine, Classification, K, N, R, C, seed, 1, {3, 224, 224}, discover_endpoints, true);
     dsl.register_endpoints(endpoints);
     dsl.enable_augmentation(true);
+    dsl.start();
 
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    torch::Tensor aug_samples = torch::zeros({N + R, 3, 224, 224}, options);
+    torch::Tensor aug_samples = torch::full({N + R, 3, 224, 224}, -1, options);
     torch::Tensor aug_labels = torch::randint(K, {N + R}, options);
     torch::Tensor aug_weights = torch::zeros({N + R}, options);
 
@@ -70,6 +73,14 @@ int main(int argc, char** argv) {
         dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
         int size = dsl.wait();
         std::cout << "Received " << size - N << std::endl;
+
+        for (int j = 0; j < size; j++) {
+            if (j < N) {
+                ASSERT(torch::equal(aug_samples[j], torch::full({3, 224, 224}, i, options)));
+            } else {
+                ASSERT(!torch::equal(aug_samples[j], torch::full({3, 224, 224}, -1, options)));
+            }
+        }
     }
 
     return 0;
