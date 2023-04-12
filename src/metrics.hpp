@@ -4,25 +4,22 @@
 #include <chrono>
 
 struct metrics_t {
-    std::chrono::system_clock::time_point last_accumulate_time;
-    std::chrono::system_clock::time_point last_queue_time;
+    float accumulate_time;
+    float batch_copy_time;
+    float bulk_prepare_time;
+    float rpcs_resolve_time;
+    float representatives_copy_time;
+    float queue_time;
+    float buffer_update_time;
 
-    std::chrono::duration<double> accumulate_time;
-    std::chrono::duration<double> batch_copy_time;
-    std::chrono::duration<double> bulk_prepare_time;
-    std::chrono::duration<double> rpcs_resolve_time;
-    std::chrono::duration<double> representatives_copy_time;
-    std::chrono::duration<double> queue_time;
-    std::chrono::duration<double> buffer_update_time;
-
-    std::vector<double> get_durations() const {
+    std::vector<float> get_durations() const {
         return {
-            accumulate_time.count(),
-            batch_copy_time.count(),
-            bulk_prepare_time.count(),
-            rpcs_resolve_time.count(),
-            representatives_copy_time.count(),
-            buffer_update_time.count()
+            accumulate_time,
+            batch_copy_time,
+            bulk_prepare_time,
+            rpcs_resolve_time,
+            representatives_copy_time,
+            buffer_update_time
         };
     }
 };

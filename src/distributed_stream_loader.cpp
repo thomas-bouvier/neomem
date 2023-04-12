@@ -38,7 +38,11 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
         representative_shape(_representative_shape), verbose(_verbose) {
     num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
 
+#ifndef WITHOUT_CUDA
     init_rehearsal_buffers(true);
+#else
+    init_rehearsal_buffers(false);
+#endif
 
     define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
@@ -142,36 +146,54 @@ void distributed_stream_loader_t::async_process() {
         batch.aug_size = 0;
         request_queue.pop_front();
         lock.unlock();
-        metrics[i_batch].accumulate_time = std::chrono::system_clock::now() - metrics[i_batch].last_accumulate_time;
 
-        // COPY m into m'
-        auto now = std::chrono::system_clock::now();
         // An empty batch is a signal for shutdown
         if (!batch.samples.defined())
             break;
         int batch_size = batch.samples.sizes()[0];
         ASSERT(batch.targets.dim() == 1 && batch_size == batch.targets.sizes()[0]);
 
+        // COPY m into m'
         // Initialization of the augmented result
         if (!use_allocated_variables) {
             ASSERT(batch.aug_samples.dim() > 0 && batch.aug_targets.dim() == 1);
             auto actual_R = batch.aug_samples.sizes()[0] - batch_size;
             ASSERT(actual_R > 0 && actual_R + batch_size == batch.aug_targets.sizes()[0]
                 && actual_R + batch_size == batch.aug_weights.sizes()[0]);
+
+            cudaEvent_t start_copy, stop_copy;
+            cudaEventCreate(&start_copy);
+            cudaEventCreate(&stop_copy);
+            cudaEventRecord(start_copy);
+
             copy_last_batch(batch, batch_size);
+
+            cudaEventRecord(stop_copy);
+            cudaEventSynchronize(stop_copy);
+            float ms = 0;
+            cudaEventElapsedTime(&ms, start_copy, stop_copy);
+            metrics[i_batch].batch_copy_time = ms;
         }
-        metrics[i_batch].batch_copy_time = std::chrono::system_clock::now() - now;
 
         if (augmentation_enabled)
             augment_batch(batch, batch_size);
 
-        i_batch++;
-
         // UPDATE buffer
-        now = std::chrono::system_clock::now();
+        cudaEvent_t start_update, stop_update;
+        cudaEventCreate(&start_update);
+        cudaEventCreate(&stop_update);
+        cudaEventRecord(start_update);
+
         populate_rehearsal_buffer(batch);
         update_representative_weights(R, batch_size);
-        metrics[i_batch].buffer_update_time = std::chrono::system_clock::now() - now;
+
+        cudaEventRecord(stop_update);
+        cudaEventSynchronize(stop_update);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, start_update, stop_update);
+        metrics[i_batch].buffer_update_time = ms;
+
+        i_batch++;
 
         lock.lock();
         response_queue.emplace_back(batch);
@@ -248,8 +270,12 @@ void distributed_stream_loader_t::expose_memory(exposed_memory_t &mem) {
 void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_size) {
     std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
 
-    // PREPARE bulk
-    auto now = std::chrono::system_clock::now();
+    // DISPATCH rpcs
+    cudaEvent_t start_dispatch, stop_dispatch;
+    cudaEventCreate(&start_dispatch);
+    cudaEventCreate(&stop_dispatch);
+    cudaEventRecord(start_dispatch);
+
     // Iterate over nodes and issuing corresponding rpc requests
     auto j = 0;
     std::vector<tl::async_response> responses;
@@ -261,10 +287,18 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_s
         j += indices.second.size() * num_samples_per_representative * num_bytes_per_representative;
     }
     ASSERT(responses.size() == indices_per_node.size());
-    metrics[i_batch].bulk_prepare_time = std::chrono::system_clock::now() - now;
+    cudaEventRecord(stop_dispatch);
+    cudaEventSynchronize(stop_dispatch);
+    float ms = 0;
+    cudaEventElapsedTime(&ms, start_dispatch, stop_dispatch);
+    metrics[i_batch].bulk_prepare_time = ms;
 
     // SAMPLE globally
-    now = std::chrono::system_clock::now();
+    cudaEvent_t start_resolve, stop_resolve;
+    cudaEventCreate(&start_resolve);
+    cudaEventCreate(&stop_resolve);
+    cudaEventRecord(start_resolve);
+
     // Waiting for rpc requests to resolve
     for (size_t i = 0; i < indices_per_node.size(); i++) {
         std::vector<std::tuple<int, double, size_t>> metadata = responses[i].wait();
@@ -286,10 +320,27 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_s
             }
         }
     }
-    metrics[i_batch].rpcs_resolve_time = std::chrono::system_clock::now() - now;
+    cudaEventRecord(stop_resolve);
+    cudaEventSynchronize(stop_resolve);
+    ms = 0;
+    cudaEventElapsedTime(&ms, start_resolve, stop_resolve);
+    metrics[i_batch].rpcs_resolve_time = ms;
 
-    if (!use_allocated_variables)
+    // COPY representatives
+    if (!use_allocated_variables) {
+        cudaEvent_t start_copy, stop_copy;
+        cudaEventCreate(&start_copy);
+        cudaEventCreate(&stop_copy);
+        cudaEventRecord(start_copy);
+
         copy_exposed_buffer_to_aug_batch(batch, batch_size);
+
+        cudaEventRecord(stop_copy);
+        cudaEventSynchronize(stop_copy);
+        ms = 0;
+        cudaEventElapsedTime(&ms, start_copy, stop_copy);
+        metrics[i_batch].representatives_copy_time = ms;
+    }
 }
 
 /**
@@ -299,8 +350,6 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t 
     auto nbytes = num_samples_per_representative * num_bytes_per_representative;
 
     if (!use_allocated_variables) {
-        // COPY representatives
-        auto now = std::chrono::system_clock::now();
 #ifndef WITHOUT_CUDA
         ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
                             client_mem.buffer->data_ptr(),
@@ -313,7 +362,6 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t 
                 (batch.aug_size - batch_size) * nbytes
     );
 #endif
-        metrics[i_batch].representatives_copy_time = std::chrono::system_clock::now() - now;
     }
 }
 
@@ -495,7 +543,6 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
 
-    metrics[i_batch].last_accumulate_time = std::chrono::system_clock::now();
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
         request_cond.wait(lock);
@@ -514,7 +561,6 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
 
-    metrics[i_batch].last_accumulate_time = std::chrono::system_clock::now();
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
         request_cond.wait(lock);
@@ -562,7 +608,7 @@ size_t distributed_stream_loader_t::get_history_count() {
     return history_count;
 }
 
-std::vector<double> distributed_stream_loader_t::get_metrics(size_t i_batch) {
+std::vector<float> distributed_stream_loader_t::get_metrics(size_t i_batch) {
     if (!metrics.count(i_batch))
         return {};
     return metrics[i_batch].get_durations();

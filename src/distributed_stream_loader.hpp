@@ -112,7 +112,7 @@ public:
     void enable_augmentation(bool state);
     size_t get_rehearsal_size();
     size_t get_history_count();
-    std::vector<double> get_metrics(size_t i_batch);
+    std::vector<float> get_metrics(size_t i_batch);
 };
 
 #endif
