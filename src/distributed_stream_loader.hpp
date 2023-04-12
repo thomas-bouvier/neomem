@@ -14,6 +14,7 @@
 namespace tl = thallium;
 
 enum Task { Classification, Reconstruction };
+enum BufferStrategy { NoBuffer, CPUBuffer, CUDABuffer };
 
 
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
@@ -27,7 +28,8 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     std::default_random_engine rand_gen;
     unsigned int num_samples_per_representative, num_bytes_per_representative;
     std::vector<long> representative_shape;
-    bool cuda_rdma, verbose;
+    BufferStrategy buffer_strategy = NoBuffer;
+    bool verbose;
 
     torch::Tensor* rehearsal_tensor = nullptr;
     std::vector<std::pair<size_t, double>> rehearsal_metadata;
@@ -92,8 +94,8 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
 public:
     distributed_stream_loader_t(const engine_loader_t& engine, Task _task_type,
         unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
-        unsigned int _num_samples_per_representative,
-        std::vector<long> _representative_shape,
+        unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
+        BufferStrategy _buffer_strategy,
         bool discover_endpoints = false, bool _verbose = false);
     ~distributed_stream_loader_t();
 

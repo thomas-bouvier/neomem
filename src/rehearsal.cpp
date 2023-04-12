@@ -13,7 +13,7 @@ PYBIND11_MODULE(neomem, m) {
         .def(py::init<std::string, uint16_t, bool>(), py::call_guard<py::scoped_ostream_redirect>());
 
     py::class_<distributed_stream_loader_t>(m, "DistributedStreamLoader")
-        .def(py::init<engine_loader_t, Task, unsigned int, unsigned int, unsigned int, unsigned int, int64_t, unsigned int, std::vector<long>, bool, bool>(), py::call_guard<py::scoped_ostream_redirect>())
+        .def(py::init<engine_loader_t, Task, unsigned int, unsigned int, unsigned int, unsigned int, int64_t, unsigned int, std::vector<long>, BufferStrategy, bool, bool>(), py::call_guard<py::scoped_ostream_redirect>())
         .def("register_endpoints", &distributed_stream_loader_t::register_endpoints)
         .def("use_these_allocated_variables", &distributed_stream_loader_t::use_these_allocated_variables)
         .def("enable_augmentation", &distributed_stream_loader_t::enable_augmentation)
@@ -29,5 +29,11 @@ PYBIND11_MODULE(neomem, m) {
     py::enum_<Task>(m, "Task")
         .value("Classification", Classification)
         .value("Reconstruction", Reconstruction)
+        .export_values();
+    
+    py::enum_<BufferStrategy>(m, "BufferStrategy")
+        .value("NoBuffer", NoBuffer)
+        .value("CPUBuffer", CPUBuffer)
+        .value("CUDABuffer", CUDABuffer)
         .export_values();
 }

@@ -26,16 +26,15 @@ using namespace torch::indexing;
  * content of its rehearsal buffer by sampling from the n other rehearsal
  * buffers.
  */
-distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& _engine_loader,
-    Task _task_type, unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C,
-    int64_t seed, unsigned int _num_samples_per_representative,
-    std::vector<long> _representative_shape,
-    bool discover_endpoints, bool _verbose)
+distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& _engine_loader, Task _task_type,
+    unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
+    unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
+    BufferStrategy _buffer_strategy, bool discover_endpoints, bool _verbose)
         : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id()),
         engine_loader(_engine_loader),
         task_type(_task_type), K(_K), N(_N), R(_R), C(_C), rand_gen(seed),
         num_samples_per_representative(_num_samples_per_representative),
-        representative_shape(_representative_shape), verbose(_verbose) {
+        representative_shape(_representative_shape), buffer_strategy(_buffer_strategy), verbose(_verbose) {
     num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
 
 #ifndef WITHOUT_CUDA
@@ -175,8 +174,9 @@ void distributed_stream_loader_t::async_process() {
             metrics[i_batch].batch_copy_time = ms;
         }
 
-        if (augmentation_enabled)
+        if (augmentation_enabled) {
             augment_batch(batch, batch_size);
+        }
 
         // UPDATE buffer
         cudaEvent_t start_update, stop_update;
@@ -207,12 +207,12 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch
     ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr(),
                         batch.samples.data_ptr(),
                         batch_size * num_bytes_per_representative,
-                        cudaMemcpyDeviceToDevice
+                        cudaMemcpyDefault
     ) == cudaSuccess);
     ASSERT(cudaMemcpy((char *) batch.aug_targets.data_ptr(),
                         batch.targets.data_ptr(),
                         batch_size * batch.targets[0].nbytes(),
-                        cudaMemcpyDeviceToDevice
+                        cudaMemcpyDefault
     ) == cudaSuccess);
 #else
     std::memcpy((char *) batch.aug_samples.data_ptr(),
@@ -237,17 +237,22 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch
  + - 
  */
 void distributed_stream_loader_t::expose_memory(exposed_memory_t &mem) {
-    if (use_allocated_variables) {
+    if (buffer_strategy == NoBuffer) {
+        if (!use_allocated_variables)
+            throw std::invalid_argument("NoBuffer policy is selected, so we should write in a variable declared on the Python side, which you didn't provide (or use CPUBuffer or CUDABuffer)");
         if (!engine_loader.is_cuda_rdma_enabled() && alloc_aug_samples.is_cuda())
-            throw std::invalid_argument("The augmented mini-batch is stored in CUDA memory, allocated policy is selected, but cuda+verbs is not supported");
+            throw std::invalid_argument("NoBuffer policy is selected, but cuda+verbs is not supported");
 
         mem.buffer = &alloc_aug_samples;
     } else {
         auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-#ifndef WITHOUT_CUDA
-        if (engine_loader.is_cuda_rdma_enabled())
+        if (buffer_strategy == CUDABuffer) {
+            if (!engine_loader.is_cuda_rdma_enabled())
+                throw std::invalid_argument("CUDABuffer policy is selected, but cuda+verbs is not supported");
+
             options = options.device(torch::kCUDA);
-#endif
+        }
+
         auto shape = representative_shape;
         shape.insert(shape.begin(), R);
         mem.buffer = new torch::Tensor(torch::ones(shape, options));
@@ -327,7 +332,7 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_s
     metrics[i_batch].rpcs_resolve_time = ms;
 
     // COPY representatives
-    if (!use_allocated_variables) {
+    if (buffer_strategy != NoBuffer) {
         cudaEvent_t start_copy, stop_copy;
         cudaEventCreate(&start_copy);
         cudaEventCreate(&stop_copy);
@@ -349,20 +354,28 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_s
 void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size) {
     auto nbytes = num_samples_per_representative * num_bytes_per_representative;
 
-    if (!use_allocated_variables) {
+    char* target = nullptr;
+    size_t count = 0;
+    if (use_allocated_variables) {
+        target = (char *) alloc_aug_samples.data_ptr();
+        count = batch.aug_size * nbytes;
+    } else {
+        target = (char *) batch.aug_samples.data_ptr() + batch_size * nbytes;
+        count = (batch.aug_size - batch_size) * nbytes;
+    }
+
 #ifndef WITHOUT_CUDA
-        ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
-                            client_mem.buffer->data_ptr(),
-                            (batch.aug_size - batch_size) * nbytes,
-                            cudaMemcpyHostToDevice
-        ) == cudaSuccess);
+    ASSERT(cudaMemcpy(target,
+                      client_mem.buffer->data_ptr(),
+                      count,
+                      cudaMemcpyDefault
+    ) == cudaSuccess);
 #else
-    std::memcpy((char *) batch.aug_samples.data_ptr() + batch_size * nbytes,
+    std::memcpy(target,
                 client_mem.buffer->data_ptr(),
-                (batch.aug_size - batch_size) * nbytes
+                count
     );
 #endif
-    }
 }
 
 /**
