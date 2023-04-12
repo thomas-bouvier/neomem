@@ -2,6 +2,7 @@
 cmake_minimum_required(VERSION 3.19 FATAL_ERROR)
 
 project(Neomem VERSION "0.0.1")
+set(CMAKE_CXX_STANDARD 17)
 
 option(WITHOUT_CUDA "Disable CUDA support" OFF)
 

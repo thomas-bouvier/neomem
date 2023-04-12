@@ -71,12 +71,13 @@ int main(int argc, char** argv) {
         std::cout << "Round " << i << std::endl;
         auto batch = random_batch(i);
         dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
-        int size = dsl.wait();
+        size_t size = dsl.wait();
         std::cout << "Received " << size - N << std::endl;
 
-        for (int j = 0; j < size; j++) {
+        for (size_t j = 0; j < size; j++) {
             if (j < N) {
-                ASSERT(torch::equal(aug_samples[j], torch::full({3, 224, 224}, i, options)));
+                int pixel = i % K;
+                ASSERT(torch::equal(aug_samples[j], torch::full({3, 224, 224}, pixel, options)));
             } else {
                 ASSERT(!torch::equal(aug_samples[j], torch::full({3, 224, 224}, -1, options)));
             }
