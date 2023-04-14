@@ -1,5 +1,6 @@
 #include "distributed_stream_loader.hpp"
 #include "mpi_utils.hpp"
+#include "debug.hpp"
 
 #include <tuple>
 #include <chrono>
@@ -9,11 +10,6 @@
 #include <thallium/serialization/stl/vector.hpp>
 #include <cereal/types/string.hpp>
 
-#ifndef WITHOUT_CUDA
-#include <cuda_runtime.h>
-#endif
-
-#include "debug.hpp"
 
 using namespace torch::indexing;
 
@@ -55,6 +51,8 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
             register_endpoints(all_endpoints);
         }
     }
+
+    cudaStreamCreate(&stream);
 }
 
 /**
@@ -134,7 +132,7 @@ void distributed_stream_loader_t::start() {
  * the response_queue (which will be consumed in turn by wait()).
  */
 void distributed_stream_loader_t::async_process() {
-    expose_memory(client_mem);
+    init_receiving_rdma_buffer(client_mem);
 
     while (true) {
         // WAITING for data
@@ -193,6 +191,7 @@ void distributed_stream_loader_t::async_process() {
         cudaEventElapsedTime(&ms, start_update, stop_update);
         metrics[i_batch].buffer_update_time = ms;
 
+        cudaStreamSynchronize(stream);
         i_batch++;
 
         lock.lock();
@@ -204,15 +203,17 @@ void distributed_stream_loader_t::async_process() {
 
 void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch_size) {
 #ifndef WITHOUT_CUDA
-    ASSERT(cudaMemcpy((char *) batch.aug_samples.data_ptr(),
+    ASSERT(cudaMemcpyAsync((char *) batch.aug_samples.data_ptr(),
                         batch.samples.data_ptr(),
                         batch_size * num_bytes_per_representative,
-                        cudaMemcpyDefault
+                        cudaMemcpyDefault,
+                        stream
     ) == cudaSuccess);
-    ASSERT(cudaMemcpy((char *) batch.aug_targets.data_ptr(),
+    ASSERT(cudaMemcpyAsync((char *) batch.aug_targets.data_ptr(),
                         batch.targets.data_ptr(),
                         batch_size * batch.targets[0].nbytes(),
-                        cudaMemcpyDefault
+                        cudaMemcpyDefault,
+                        stream
     ) == cudaSuccess);
 #else
     std::memcpy((char *) batch.aug_samples.data_ptr(),
@@ -232,11 +233,11 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch
 }
 
 /**
- * Should return a bulk (called only once)
- * - in the best case, to an once-allocated variable from Python
- + - 
+ * Should return a bulk, taking into account:
+ * - the 'allocated policy'
+ * - the buffer strategy, NoBuffer, CPUBuffer or CUDABuffer
  */
-void distributed_stream_loader_t::expose_memory(exposed_memory_t &mem) {
+void distributed_stream_loader_t::init_receiving_rdma_buffer(exposed_memory_t &mem) {
     if (buffer_strategy == NoBuffer) {
         if (!use_allocated_variables)
             throw std::invalid_argument("NoBuffer policy is selected, so we should write in a variable declared on the Python side, which you didn't provide (or use CPUBuffer or CUDABuffer)");
@@ -251,6 +252,10 @@ void distributed_stream_loader_t::expose_memory(exposed_memory_t &mem) {
                 throw std::invalid_argument("CUDABuffer policy is selected, but cuda+verbs is not supported");
 
             options = options.device(torch::kCUDA);
+        } else {
+#ifndef WITHOUT_CUDA
+            options = options.pinned_memory(true);
+#endif
         }
 
         auto shape = representative_shape;
@@ -365,10 +370,11 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t 
     }
 
 #ifndef WITHOUT_CUDA
-    ASSERT(cudaMemcpy(target,
+    ASSERT(cudaMemcpyAsync(target,
                       client_mem.buffer->data_ptr(),
                       count,
-                      cudaMemcpyDefault
+                      cudaMemcpyDefault,
+                      stream
     ) == cudaSuccess);
 #else
     std::memcpy(target,

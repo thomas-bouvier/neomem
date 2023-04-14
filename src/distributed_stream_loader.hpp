@@ -11,6 +11,10 @@
 #include <random>
 #include <vector>
 
+#ifndef WITHOUT_CUDA
+#include <cuda_runtime.h>
+#endif
+
 namespace tl = thallium;
 
 enum Task { Classification, Reconstruction };
@@ -60,6 +64,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
         exposed_memory_t() { }
     };
 
+    cudaStream_t stream;
     bool use_allocated_variables = false;
     torch::Tensor alloc_aug_samples;
     torch::Tensor alloc_aug_targets;
@@ -108,7 +113,7 @@ public:
     int wait();
 
     void use_these_allocated_variables(const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
-    void expose_memory(exposed_memory_t &mem);
+    void init_receiving_rdma_buffer(exposed_memory_t &mem);
     void copy_last_batch(queue_item_t &batch, int batch_size);
 
     void enable_augmentation(bool state);
