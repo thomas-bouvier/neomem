@@ -105,6 +105,7 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
     rehearsal_tensor = new torch::Tensor(torch::empty(rehearsal_shape, options));
     ASSERT(rehearsal_tensor->is_contiguous());
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 0.0));
+    rehearsal_counts.insert(rehearsal_counts.begin(), K, 0);
     DBG("Distributed buffer memory allocated!");
 
     auto shape = representative_shape;
@@ -444,15 +445,19 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
                 rehearsal_size++;
                 rehearsal_metadata[label].first++;
             }
-            history_count++;
+            rehearsal_counts[label]++;
         }
     }
 }
 
+/**
+ * With big datasets like ImageNet, the following formula results in really
+ * small weights. Keeping this function as future work.
+ */
 void distributed_stream_loader_t::update_representative_weights(int num_representatives, int batch_size) {
     double weight = (double) batch_size / (double) (num_representatives * rehearsal_size);
-    for (auto &pair : rehearsal_metadata) {
-        pair.second = std::max(std::log(pair.first * weight), 1.0);
+    for (size_t i = 0; i < rehearsal_metadata.size(); i++) {
+        rehearsal_metadata[i].second = std::max(std::log(rehearsal_counts[i] * weight), 1.0);
     }
 }
 
@@ -621,10 +626,6 @@ void distributed_stream_loader_t::enable_augmentation(bool state) {
 
 size_t distributed_stream_loader_t::get_rehearsal_size() {
     return rehearsal_size;
-}
-
-size_t distributed_stream_loader_t::get_history_count() {
-    return history_count;
 }
 
 std::vector<float> distributed_stream_loader_t::get_metrics(size_t i_batch) {
