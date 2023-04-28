@@ -420,33 +420,38 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
     auto batch_size = batch.samples.sizes()[0];
-    std::uniform_int_distribution<unsigned int> dice(0, batch_size - 1);
+    std::uniform_int_distribution<unsigned int> dice_candidate(0, batch_size - 1);
+    std::uniform_int_distribution<unsigned int> dice_buffer(0, N - 1);
     for (int i = 0; i < batch_size; i++) {
-        if (dice(rand_gen) >= C)
-            break;
+        //if (dice(rand_gen) >= C)
+        //    break;
         int label = 0;
         if (task_type == Classification)
             label = batch.targets[i].item<int>();
 
         size_t index = -1;
-        if (rehearsal_metadata[label].first < N)
+        if (rehearsal_metadata[label].first < N) {
             index = rehearsal_metadata[label].first;
-        else
-            index = dice(rand_gen);
-        // The random replacement strategy does nothing sometimes
-        if (index < N) {
-            for (size_t r = 0; r < num_samples_per_representative; r++) {
-                //TODO reconstruction
-                size_t j = N * label + index + r;
-                ASSERT(j < K * N * num_samples_per_representative);
-                rehearsal_tensor->index_put_({static_cast<int>(j)}, batch.samples.index({i}));
-            }
-            if (index >= rehearsal_metadata[label].first) {
-                rehearsal_size++;
-                rehearsal_metadata[label].first++;
-            }
-            rehearsal_counts[label]++;
+        } else {
+            if (dice_candidate(rand_gen) >= C)
+                continue;
+            index = dice_buffer(rand_gen);
         }
+
+        // The random replacement strategy does nothing sometimes
+        //if (index < N) {
+        for (size_t r = 0; r < num_samples_per_representative; r++) {
+            //TODO reconstruction
+            size_t j = N * label + index + r;
+            ASSERT(j < K * N * num_samples_per_representative);
+            rehearsal_tensor->index_put_({static_cast<int>(j)}, batch.samples.index({i}));
+        }
+        if (index >= rehearsal_metadata[label].first) {
+            rehearsal_size++;
+            rehearsal_metadata[label].first++;
+        }
+        rehearsal_counts[label]++;
+        //}
     }
 }
 
