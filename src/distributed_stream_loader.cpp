@@ -104,7 +104,7 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
     rehearsal_shape.insert(rehearsal_shape.begin(), size);
     rehearsal_tensor = new torch::Tensor(torch::empty(rehearsal_shape, options));
     ASSERT(rehearsal_tensor->is_contiguous());
-    rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 0.0));
+    rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 1.0));
     rehearsal_counts.insert(rehearsal_counts.begin(), K, 0);
     DBG("Distributed buffer memory allocated!");
 
@@ -184,7 +184,7 @@ void distributed_stream_loader_t::async_process() {
         cudaEventRecord(start_update);
 
         populate_rehearsal_buffer(batch);
-        update_representative_weights(R, batch_size);
+        //update_representative_weights(R, batch_size);
 
         cudaEventRecord(stop_update);
         cudaEventSynchronize(stop_update);
