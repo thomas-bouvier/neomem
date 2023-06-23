@@ -6,9 +6,10 @@
 #include <chrono>
 #include <stdexcept>
 
+#include <cereal/types/string.hpp>
+#include <nvtx3/nvtx3.hpp>
 #include <thallium/serialization/stl/tuple.hpp>
 #include <thallium/serialization/stl/vector.hpp>
-#include <cereal/types/string.hpp>
 
 
 using namespace torch::indexing;
@@ -60,6 +61,8 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
  * endpoints (keys) to provider ids (values).
  */
 std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const {
+    nvtx3::scoped_range r{"gather_endpoints"};
+
     int rank, num_workers = 0;
     // MPI has maybe been initialized by horovodrun
     int mpi_initialized = true;
@@ -82,6 +85,8 @@ std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const
 }
 
 void distributed_stream_loader_t::register_endpoints(const std::map<std::string, int>& endpoints) {
+    nvtx3::scoped_range r{"register_endpoints"};
+
     for (auto endpoint : endpoints) {
         std::cout << "Looking up " << endpoint.first << ", " << endpoint.second << std::endl;
         tl::endpoint server = get_engine().lookup(endpoint.first);
@@ -90,6 +95,8 @@ void distributed_stream_loader_t::register_endpoints(const std::map<std::string,
 }
 
 void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
+    nvtx3::scoped_range r{"init_rehearsal_buffer"};
+
     auto size = K * N * num_samples_per_representative;
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
 
@@ -136,6 +143,8 @@ void distributed_stream_loader_t::async_process() {
     init_receiving_rdma_buffer(client_mem);
 
     while (true) {
+        nvtx3::scoped_range r{"iteration in async_process"};
+
         // WAITING for data
         std::unique_lock<tl::mutex> lock(request_mutex);
         while (request_queue.empty())
@@ -203,6 +212,8 @@ void distributed_stream_loader_t::async_process() {
 }
 
 void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch_size) {
+    nvtx3::scoped_range r{"copy_last_batch"};
+
 #ifndef WITHOUT_CUDA
     ASSERT(cudaMemcpyAsync((char *) batch.aug_samples.data_ptr(),
                         batch.samples.data_ptr(),
@@ -239,6 +250,8 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch
  * - the buffer strategy, NoBuffer, CPUBuffer or CUDABuffer
  */
 void distributed_stream_loader_t::init_receiving_rdma_buffer(exposed_memory_t &mem) {
+    nvtx3::scoped_range r{"init_receiving_rdma_buffer"};
+
     if (buffer_strategy == NoBuffer) {
         if (!use_allocated_variables)
             throw std::invalid_argument("NoBuffer policy is selected, so we should write in a variable declared on the Python side, which you didn't provide (or use CPUBuffer or CUDABuffer)");
@@ -279,6 +292,8 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer(exposed_memory_t &m
  *
  */
 void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_size) {
+    nvtx3::scoped_range r{"augment_batch"};
+
     std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
 
     // DISPATCH rpcs
@@ -358,6 +373,8 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_s
  * We should copy from the exposed bulk to the minibatch
  */
 void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size) {
+    nvtx3::scoped_range r{"copy_exposed_buffer_to_aug_batch"};
+
     auto nbytes = num_samples_per_representative * num_bytes_per_representative;
 
     char* target = nullptr;
@@ -392,6 +409,8 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t 
  * Local indices might be used to access the provider_handles vector.
  */
 std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int R) {
+    nvtx3::scoped_range r{"pick_random_indices"};
+
     const unsigned int max_global_index = provider_handles.size() * K * N;
     std::uniform_int_distribution<unsigned int> dice(0, max_global_index - 1);
     std::vector<unsigned int> choices(R);
@@ -417,6 +436,8 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
 }
 
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
+    nvtx3::scoped_range r{"populate_rehearsal_buffer"};
+
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
     auto batch_size = batch.samples.sizes()[0];
@@ -460,6 +481,8 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
  * small weights. Keeping this function as future work.
  */
 void distributed_stream_loader_t::update_representative_weights(int num_representatives, int batch_size) {
+    nvtx3::scoped_range r{"update_representative_weights"};
+
     double weight = (double) batch_size / (double) (num_representatives * rehearsal_size);
     for (size_t i = 0; i < rehearsal_metadata.size(); i++) {
         rehearsal_metadata[i].second = std::max(std::log(rehearsal_counts[i] * weight), 1.0);
@@ -467,6 +490,8 @@ void distributed_stream_loader_t::update_representative_weights(int num_represen
 }
 
 void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices, int offset) {
+    nvtx3::scoped_range r{"get_remote_samples"};
+
     int c = 0, o = 0;
     std::vector<std::tuple<size_t, double, std::vector<int>>> samples;
 
@@ -569,6 +594,8 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
  * asynchronous fashion.
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets) {
+    nvtx3::scoped_range r{"accumulate"};
+
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
 
@@ -587,6 +614,8 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
                  const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
+    nvtx3::scoped_range r{"accumulate"};
+
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
 
@@ -617,6 +646,8 @@ void distributed_stream_loader_t::use_these_allocated_variables(const torch::Ten
  * blocking the Python thread.
  */
 int distributed_stream_loader_t::wait() {
+    nvtx3::scoped_range r{"wait"};
+
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (response_queue.empty())
         request_cond.wait(lock);
