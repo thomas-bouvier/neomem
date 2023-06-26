@@ -37,6 +37,8 @@ include_directories(${MPI_INCLUDE_PATH})
 
 find_package(Thallium REQUIRED)
 
+find_package(Nvtx REQUIRED)
+
 if (NOT WITHOUT_CUDA)
   find_package(CUDA REQUIRED)
 else ()
