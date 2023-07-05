@@ -36,7 +36,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     bool verbose;
 
     torch::Tensor* rehearsal_tensor = nullptr;
-    std::vector<std::pair<size_t, double>> rehearsal_metadata;
+    std::vector<std::pair<size_t, float>> rehearsal_metadata;
     std::vector<int> rehearsal_counts;
     size_t rehearsal_size = 0;
 
@@ -65,6 +65,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     };
 
     cudaStream_t stream;
+
     bool use_allocated_variables = false;
     torch::Tensor alloc_aug_samples;
     torch::Tensor alloc_aug_targets;
