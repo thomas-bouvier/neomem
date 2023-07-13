@@ -57,4 +57,5 @@ add_definitions(
   -D__DEBUG
 )
 
+add_subdirectory(third_party/cuda-api-wrappers)
 add_subdirectory(src)

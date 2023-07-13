@@ -17,6 +17,7 @@ PYBIND11_MODULE(neomem, m) {
         .def("register_endpoints", &distributed_stream_loader_t::register_endpoints)
         .def("use_these_allocated_variables", &distributed_stream_loader_t::use_these_allocated_variables)
         .def("enable_augmentation", &distributed_stream_loader_t::enable_augmentation)
+        .def("measure_performance", &distributed_stream_loader_t::measure_performance)
         .def("start", &distributed_stream_loader_t::start)
         .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
         .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &,

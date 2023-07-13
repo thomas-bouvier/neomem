@@ -3,6 +3,7 @@
 
 #include "engine_loader.hpp"
 #include "metrics.hpp"
+#include "../third_party/cuda-api-wrappers/src/cuda/api.hpp"
 
 #include <torch/extension.h>
 #include <thallium.hpp>
@@ -23,7 +24,6 @@ enum BufferStrategy { NoBuffer, CPUBuffer, CUDABuffer };
 
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
     const size_t MAX_QUEUE_SIZE = 1024;
-    bool augmentation_enabled = false;
 
     engine_loader_t engine_loader;
 
@@ -41,7 +41,7 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
     size_t rehearsal_size = 0;
 
     int i_batch = 0;
-    std::map<int, metrics_t> metrics;
+    std::map<int, metrics_t> m_metrics;
 
     bool started = false;
 
@@ -64,9 +64,12 @@ class distributed_stream_loader_t : public tl::provider<distributed_stream_loade
         exposed_memory_t() { }
     };
 
-    cudaStream_t stream;
+    std::vector<cuda::stream_t> m_streams;
 
-    bool use_allocated_variables = false;
+    bool m_augmentation_enabled = false;
+    bool m_measure_performance = cuda::event::dont_record_timings;
+    bool m_use_allocated_variables = false;
+
     torch::Tensor alloc_aug_samples;
     torch::Tensor alloc_aug_targets;
     torch::Tensor alloc_aug_weights;
@@ -116,8 +119,11 @@ public:
     void use_these_allocated_variables(const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
     void init_receiving_rdma_buffer(exposed_memory_t &mem);
     void copy_last_batch(queue_item_t &batch, int batch_size);
+    std::size_t dispatch_rpcs(std::vector<tl::async_response> &responses);
+    void resolve_rpcs(std::vector<tl::async_response> &responses, queue_item_t &batch);
 
     void enable_augmentation(bool state);
+    void measure_performance(bool state);
     size_t get_rehearsal_size();
     std::vector<float> get_metrics(size_t i_batch);
 };

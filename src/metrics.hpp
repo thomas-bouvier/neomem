@@ -4,7 +4,6 @@
 #include <chrono>
 
 struct metrics_t {
-    float accumulate_time;
     float batch_copy_time;
     float bulk_prepare_time;
     float rpcs_resolve_time;
@@ -14,7 +13,6 @@ struct metrics_t {
 
     std::vector<float> get_durations() const {
         return {
-            accumulate_time,
             batch_copy_time,
             bulk_prepare_time,
             rpcs_resolve_time,

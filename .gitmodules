@@ -1,0 +1,3 @@
+[submodule "third_party/cuda-api-wrappers"]
+	path = third_party/cuda-api-wrappers
+	url = git@github.com:eyalroz/cuda-api-wrappers.git
