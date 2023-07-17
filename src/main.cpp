@@ -55,14 +55,22 @@ int main(int argc, char** argv) {
     dsl.enable_augmentation(true);
     dsl.start();
 
-    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    torch::Tensor aug_samples = torch::full({N + R, 3, 224, 224}, -1, options);
-    torch::Tensor aug_labels = torch::randint(K, {N + R}, options);
-    torch::Tensor aug_weights = torch::zeros({N + R}, options);
+    torch::DeviceType device_type;
+    if (torch::cuda::is_available()) {
+        std::cout << "CUDA is available on this system. Using CUDA." << std::endl;
+        device_type = torch::kCUDA;
+    } else {
+        std::cout << "CUDA is NOT available on this system. Using CPU." << std::endl;
+        device_type = torch::kCPU;
+    }
 
-    auto random_batch = [server_id](int i) -> std::tuple<torch::Tensor, torch::Tensor> {
-        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-        auto label = static_cast<double>(i % K);
+    torch::Tensor aug_samples = torch::full({N + R, 3, 224, 224}, -1, torch::TensorOptions().dtype(torch::kFloat32).device(device_type));
+    torch::Tensor aug_labels = torch::randint(K, {N + R}, torch::TensorOptions().dtype(torch::kInt64).device(device_type));
+    torch::Tensor aug_weights = torch::zeros({N + R}, torch::TensorOptions().dtype(torch::kFloat32).device(device_type));
+
+    auto random_batch = [server_id, device_type](int i, torch::DeviceType d) -> std::tuple<torch::Tensor, torch::Tensor> {
+        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(d);
+        auto label = static_cast<long int>(i % K);
         torch::Tensor labels = torch::full({N}, label);
         torch::Tensor samples = torch::full({N, 3, 224, 224}, label, options);
         return std::make_tuple<>(samples, labels);
@@ -70,7 +78,7 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < 1000; i++) {
         std::cout << "Round " << i << std::endl;
-        auto batch = random_batch(i);
+        auto batch = random_batch(i, device_type);
         dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
         size_t size = dsl.wait();
         std::cout << "Received " << size - N << std::endl;
@@ -78,9 +86,9 @@ int main(int argc, char** argv) {
         for (size_t j = 0; j < size; j++) {
             if (j < N) {
                 int pixel = i % K;
-                ASSERT(torch::equal(aug_samples[j], torch::full({3, 224, 224}, pixel, options)));
+                ASSERT(torch::equal(aug_samples[j], torch::full({3, 224, 224}, pixel, torch::TensorOptions().dtype(torch::kFloat32).device(device_type))));
             } else {
-                ASSERT(!torch::equal(aug_samples[j], torch::full({3, 224, 224}, -1, options)));
+                ASSERT(!torch::equal(aug_samples[j], torch::full({3, 224, 224}, -1, torch::TensorOptions().dtype(torch::kFloat32).device(device_type))));
             }
         }
     }

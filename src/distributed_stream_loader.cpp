@@ -37,14 +37,14 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
 
 #ifndef WITHOUT_CUDA
     init_rehearsal_buffers(true);
-        auto device = cuda::device::current::get();
-        std::generate_n(
-            // first stream for client, second for server
-            std::back_inserter(m_streams), 2,
-            [&device]() {
-                return device.create_stream(cuda::stream::sync);
-            }
-        );
+    auto device = cuda::device::current::get();
+    std::generate_n(
+        // first stream for client, second for server
+        std::back_inserter(m_streams), 2,
+        [&device]() {
+            return device.create_stream(cuda::stream::async);
+        }
+    );
 #else
     init_rehearsal_buffers(false);
 #endif
@@ -169,7 +169,8 @@ void distributed_stream_loader_t::async_process() {
         int batch_size = batch.samples.sizes()[0];
         ASSERT(batch.targets.dim() == 1 && batch_size == batch.targets.sizes()[0]);
 
-        // Initialization of the augmented result
+        // Initialization of the augmented result, which changes at every
+        // iteration with implementation `standard`
         if (!m_use_allocated_variables) {
             dest_samples = &batch.aug_samples;
             dest_targets = &batch.aug_targets;
@@ -183,10 +184,6 @@ void distributed_stream_loader_t::async_process() {
                 && actual_R + batch_size == batch.aug_weights.sizes()[0]);
 
             copy_last_batch(batch, batch_size);
-        } else {
-            dest_samples = &alloc_aug_samples;
-            dest_targets = &alloc_aug_targets;
-            dest_weights = &alloc_aug_weights;
         }
 
         if (m_augmentation_enabled) {
@@ -719,6 +716,11 @@ void distributed_stream_loader_t::use_these_allocated_variables(const torch::Ten
     alloc_aug_samples = aug_samples;
     alloc_aug_targets = aug_targets;
     alloc_aug_weights = aug_weights;
+
+    dest_samples = &alloc_aug_samples;
+    dest_targets = &alloc_aug_targets;
+    dest_weights = &alloc_aug_weights;
+
     m_use_allocated_variables = true;
 
     ASSERT(alloc_aug_samples.dim() > 0 && alloc_aug_targets.dim() == 1);
