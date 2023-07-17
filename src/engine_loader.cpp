@@ -1,6 +1,5 @@
 #include "engine_loader.hpp"
 
-
 engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_id, bool _cuda_rdma)
     : server_address(address), server_id(provider_id), cuda_rdma(_cuda_rdma) {
     struct hg_init_info hii;

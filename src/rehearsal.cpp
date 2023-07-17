@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/iostream.h>
 
+#include "engine_loader.hpp"
 #include "distributed_stream_loader.hpp"
 
 namespace py = pybind11;

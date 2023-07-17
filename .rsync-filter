@@ -1,5 +1,5 @@
 - .git
-- neomem_example
+- neomem*
 - *.so
 - *.cmake
 - vgcore*

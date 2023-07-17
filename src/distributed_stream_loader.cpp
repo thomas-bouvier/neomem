@@ -39,9 +39,10 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
     init_rehearsal_buffers(true);
         auto device = cuda::device::current::get();
         std::generate_n(
-            std::back_inserter(m_streams), 1,
+            // first stream for client, second for server
+            std::back_inserter(m_streams), 2,
             [&device]() {
-                return device.create_stream(cuda::stream::async);
+                return device.create_stream(cuda::stream::sync);
             }
         );
 #else
@@ -170,12 +171,22 @@ void distributed_stream_loader_t::async_process() {
 
         // Initialization of the augmented result
         if (!m_use_allocated_variables) {
+            dest_samples = &batch.aug_samples;
+            dest_targets = &batch.aug_targets;
+            dest_weights = &batch.aug_weights;
+
+            batch.m_augmentation_mark = batch_size;
+
             ASSERT(batch.aug_samples.dim() > 0 && batch.aug_targets.dim() == 1);
             auto actual_R = batch.aug_samples.sizes()[0] - batch_size;
             ASSERT(actual_R > 0 && actual_R + batch_size == batch.aug_targets.sizes()[0]
                 && actual_R + batch_size == batch.aug_weights.sizes()[0]);
 
             copy_last_batch(batch, batch_size);
+        } else {
+            dest_samples = &alloc_aug_samples;
+            dest_targets = &alloc_aug_targets;
+            dest_weights = &alloc_aug_weights;
         }
 
         if (m_augmentation_enabled) {
@@ -364,7 +375,6 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
 #endif
     timer.start();
 
-    // Waiting for rpc requests to resolve
     for (size_t i = 0; i < responses.size(); i++) {
         std::vector<std::tuple<int, float, size_t>> metadata = responses[i].wait();
 
@@ -376,46 +386,26 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
 
             for (size_t j = 0; j < num_targets; j++) {
 #ifndef WITHOUT_CUDA
-                if (m_use_allocated_variables) {
-                    torch::Tensor t_label = torch::full({}, label, alloc_aug_targets.options());
-                    torch::Tensor t_weight = torch::full({}, weight, alloc_aug_weights.options());
-                    ASSERT(cudaMemcpyAsync((char *) alloc_aug_targets.data_ptr() + batch.aug_size * alloc_aug_targets.element_size(),
-                                        t_label.data_ptr(),
-                                        t_label.element_size(),
-                                        cudaMemcpyDefault,
-                                        m_streams[0].handle()
-                    ) == cudaSuccess);
-                    ASSERT(cudaMemcpyAsync((char *) alloc_aug_weights.data_ptr() + batch.aug_size * alloc_aug_weights.element_size(),
-                                        t_weight.data_ptr(),
-                                        t_weight.element_size(),
-                                        cudaMemcpyDefault,
-                                        m_streams[0].handle()
-                    ) == cudaSuccess);
-                } else {
-                    torch::Tensor t_label = torch::full({}, label, batch.aug_targets.options());
-                    torch::Tensor t_weight = torch::full({}, weight, batch.aug_weights.options());
-                    ASSERT(cudaMemcpyAsync((char *) batch.aug_targets.data_ptr() + batch.aug_size * batch.aug_targets.element_size(),
-                                        t_label.data_ptr(),
-                                        t_label.element_size(),
-                                        cudaMemcpyDefault,
-                                        m_streams[0].handle()
-                    ) == cudaSuccess);
-                    ASSERT(cudaMemcpyAsync((char *) batch.aug_weights.data_ptr() + batch.aug_size * batch.aug_weights.element_size(),
-                                        t_weight.data_ptr(),
-                                        t_weight.element_size(),
-                                        cudaMemcpyDefault,
-                                        m_streams[0].handle()
-                    ) == cudaSuccess);
-                }
+                torch::Tensor t_label = torch::tensor(label, dest_targets->options());
+                torch::Tensor t_weight = torch::tensor(weight, dest_weights->options());
+                // calculated pointer: dest_targets->data_ptr<long int>() + batch.aug_size
+                // actual pointer: (*dest_targets)[batch.aug_size].data_ptr()
+                cuda::memory::async::copy(
+                    // no * batch.element_size() as type is given
+                    dest_targets->data_ptr<long int>() + batch.aug_size,
+                    t_label.data_ptr(),
+                    t_label.element_size(),
+                    m_streams[0]
+                );
+                cuda::memory::async::copy(
+                    dest_weights->data_ptr<float>() + batch.aug_size,
+                    t_weight.data_ptr(),
+                    t_weight.element_size(),
+                    m_streams[0]
+                );
 #else
-
-                if (m_use_allocated_variables) {
-                    alloc_aug_targets.index_put_({batch.aug_size}, label);
-                    alloc_aug_weights.index_put_({batch.aug_size}, weight);
-                } else {
-                    batch.aug_targets.index_put_({batch.aug_size}, label);
-                    batch.aug_weights.index_put_({batch.aug_size}, weight);
-                }
+                dest_targets->index_put_({batch.aug_size}, label);
+                dest_weights->index_put_({batch.aug_size}, weight);
 #endif
                 batch.aug_size++;
             }
@@ -426,7 +416,10 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
 }
 
 /**
- * We should copy from the exposed bulk to the minibatch
+ * We should copy from the exposed bulk to the minibatch `dest_samples`. The
+ * latter has either been passed during the last iteration (`batch.aug_samples`)
+ * or has been allocated once at the beginning of the execution
+ * (`alloc_aug_samples`).
  */
 void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size) {
     nvtx3::scoped_range r{"copy_exposed_buffer_to_aug_batch"};
@@ -437,20 +430,11 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t 
     timer.start();
 
     auto nbytes = num_samples_per_representative * num_bytes_per_representative;
-
-    char* target = nullptr;
-    size_t count = 0;
-    if (m_use_allocated_variables) {
-        target = (char *) alloc_aug_samples.data_ptr();
-        count = batch.aug_size * nbytes;
-    } else {
-        target = (char *) batch.aug_samples.data_ptr() + batch_size * nbytes;
-        count = (batch.aug_size - batch_size) * nbytes;
-    }
+    size_t count = (batch.aug_size - batch.m_augmentation_mark) * nbytes;
 
 #ifndef WITHOUT_CUDA
     ASSERT(cudaMemcpyAsync(
-        target,
+        (char *) dest_samples->data_ptr() + batch.m_augmentation_mark * nbytes,
         client_mem.buffer->data_ptr(),
         count,
         cudaMemcpyDefault,
@@ -458,7 +442,7 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t 
     ) == cudaSuccess);
 #else
     std::memcpy(
-        target,
+        (char *) dest_samples->data_ptr() + batch.m_augmentation_mark * nbytes,
         client_mem.buffer->data_ptr(),
         count
     );
@@ -660,7 +644,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
                 rehearsal_tensor->index({reprs_indices[i]}).data_ptr(),
                 num_samples_per_representative * num_bytes_per_representative,
                 cudaMemcpyDefault,
-                m_streams[0].handle()
+                m_streams[1].handle()
             ) == cudaSuccess);
 #else
             server_mem.buffer->index_put_({o}, rehearsal_tensor->index({reprs_indices[i]}));

@@ -109,6 +109,10 @@ protected:
     torch::Tensor alloc_aug_targets;
     torch::Tensor alloc_aug_weights;
 
+    torch::Tensor* dest_samples = nullptr;
+    torch::Tensor* dest_targets = nullptr;
+    torch::Tensor* dest_weights = nullptr;
+
     std::deque<queue_item_t> request_queue, response_queue;
     tl::mutex request_mutex;
     tl::condition_variable request_cond;

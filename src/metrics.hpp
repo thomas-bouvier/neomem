@@ -2,6 +2,7 @@
 #define __METRICS
 
 #include <chrono>
+#include <vector>
 
 struct metrics_t {
     float batch_copy_time;

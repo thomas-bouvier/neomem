@@ -2,6 +2,7 @@
 #include <iostream>
 #include <tuple>
 
+#include "engine_loader.hpp"
 #include "distributed_stream_loader.hpp"
 #include "debug.hpp"
 #define ___ASSERT
