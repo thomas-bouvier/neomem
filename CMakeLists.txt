@@ -57,5 +57,7 @@ add_definitions(
   -D__DEBUG
 )
 
-add_subdirectory(third_party/cuda-api-wrappers)
+if (NOT WITHOUT_CUDA)
+  add_subdirectory(third_party/cuda-api-wrappers)
+endif ()
 add_subdirectory(src)

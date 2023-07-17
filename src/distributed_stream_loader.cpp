@@ -1,6 +1,7 @@
 #include "distributed_stream_loader.hpp"
 #include "mpi_utils.hpp"
 #include "debug.hpp"
+#include "timer.hpp"
 
 #include <tuple>
 #include <chrono>
@@ -36,13 +37,20 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
 
 #ifndef WITHOUT_CUDA
     init_rehearsal_buffers(true);
+        auto device = cuda::device::current::get();
+        std::generate_n(
+            std::back_inserter(m_streams), 1,
+            [&device]() {
+                return device.create_stream(cuda::stream::async);
+            }
+        );
 #else
     init_rehearsal_buffers(false);
 #endif
 
-    define("get_samples", &distributed_stream_loader_t::get_remote_samples);
+    m_server_procedure = define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
-    get_samples_procedure = get_engine().define("get_samples");
+    m_client_procedure = get_engine().define("get_samples");
 
     // If enabled, get the remote endpoints via the MPI publishing mechanism
     if (discover_endpoints) {
@@ -52,14 +60,6 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
             register_endpoints(all_endpoints);
         }
     }
-
-    auto device = cuda::device::current::get();
-    std::generate_n(
-		std::back_inserter(m_streams), 1,
-		[&device]() {
-			return device.create_stream(cuda::stream::async);
-		}
-	);
 }
 
 /**
@@ -200,58 +200,62 @@ void distributed_stream_loader_t::async_process() {
  */
 void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch, int batch_size) {
     nvtx3::scoped_range r{"copy_last_batch"};
-    auto start_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                            m_measure_performance,
-                                            cuda::event::not_interprocess);
+    Timer timer(m_measure_performance);
+#ifndef WITHOUT_CUDA
+    timer.setStream(&m_streams[0]);
+#endif
+    timer.start();
 
     // Copy incoming samples into the next augmented minibatch
 #ifndef WITHOUT_CUDA
-    ASSERT(cudaMemcpyAsync((char *) batch.aug_samples.data_ptr(),
-                        batch.samples.data_ptr(),
-                        batch_size * num_bytes_per_representative,
-                        cudaMemcpyDefault,
-                        m_streams[0].handle()
+    ASSERT(cudaMemcpyAsync(
+        (char *) batch.aug_samples.data_ptr(),
+        batch.samples.data_ptr(),
+        batch_size * num_bytes_per_representative,
+        cudaMemcpyDefault,
+        m_streams[0].handle()
     ) == cudaSuccess);
-    ASSERT(cudaMemcpyAsync((char *) batch.aug_targets.data_ptr(),
-                        batch.targets.data_ptr(),
-                        batch_size * batch.targets.element_size(),
-                        cudaMemcpyDefault,
-                        m_streams[0].handle()
+    ASSERT(cudaMemcpyAsync(
+        (char *) batch.aug_targets.data_ptr(),
+        batch.targets.data_ptr(),
+        batch_size * batch.targets.element_size(),
+        cudaMemcpyDefault,
+        m_streams[0].handle()
     ) == cudaSuccess);
 #else
-    std::memcpy((char *) batch.aug_samples.data_ptr(),
-                batch.samples.data_ptr(),
-                batch_size * num_bytes_per_representative
+    std::memcpy(
+        (char *) batch.aug_samples.data_ptr(),
+        batch.samples.data_ptr(),
+        batch_size * num_bytes_per_representative
     );
-    std::memcpy((char *) batch.aug_targets.data_ptr(),
-                batch.targets.data_ptr(),
-                batch_size * batch.targets.element_size()
+    std::memcpy(
+        (char *) batch.aug_targets.data_ptr(),
+        batch.targets.data_ptr(),
+        batch_size * batch.targets.element_size()
     );
 #endif
 
     // Initialize weights to 1.0
     torch::Tensor weights = torch::ones({batch_size}, batch.aug_weights.options());
 #ifndef WITHOUT_CUDA
-    ASSERT(cudaMemcpyAsync((char *) batch.aug_weights.data_ptr(),
-                        weights.data_ptr(),
-                        batch_size * weights.element_size(),
-                        cudaMemcpyDefault,
-                        m_streams[0].handle()
+    ASSERT(cudaMemcpyAsync(
+        (char *) batch.aug_weights.data_ptr(),
+        weights.data_ptr(),
+        batch_size * weights.element_size(),
+        cudaMemcpyDefault,
+        m_streams[0].handle()
     ) == cudaSuccess);
 #else
-    std::memcpy((char *) batch.aug_weights.data_ptr(),
-                weights.data_ptr(),
-                batch_size * weights.element_size()
+    std::memcpy(
+        (char *) batch.aug_weights.data_ptr(),
+        weights.data_ptr(),
+        batch_size * weights.element_size()
     );
 #endif
 
     batch.aug_size = batch_size;
 
-    auto end_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                                m_measure_performance);
-    end_event.synchronize();
-    if (m_measure_performance)
-        m_metrics[i_batch].batch_copy_time = cuda::event::time_elapsed_between(start_event, end_event).count();
+    m_metrics[i_batch].batch_copy_time = timer.end();
 }
 
 /**
@@ -299,16 +303,25 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer(exposed_memory_t &m
 }
 
 /**
+ * This functions orchastrates the minibatch augmentation process, by
+ * performing the following steps:
  *
+ * 1) Dispatch rpcs to other processes. This is required by global sampling: a
+ * subset of remote representatives are sampled to add diversity to the
+ * augmented minibatch being constructed.
+ * 2) Wait for rpcs to resolve. Depending if use_these_allocated_variables()
+ * has been called before, remote data will be written in the `batch.aug_samples`
+ * or `alloc_aug_samples`.
  */
 void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_size) {
     nvtx3::scoped_range r{"augment_batch"};
 
+    // Dispatch rpcs to other processes
     std::vector<tl::async_response> responses;
     dispatch_rpcs(responses);
     resolve_rpcs(responses, batch);
 
-    // COPY representatives
+    // Copy representatives
     if (buffer_strategy != NoBuffer) {
         copy_exposed_buffer_to_aug_batch(batch, batch_size);
     }
@@ -318,40 +331,38 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_s
  *
  */
 std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses) {
-    std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
-
-    // DISPATCH rpcs
-    auto start_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                                  m_measure_performance,
-                                                  cuda::event::not_interprocess);
+    Timer timer(m_measure_performance);
+#ifndef WITHOUT_CUDA
+    timer.setStream(&m_streams[0]);
+#endif
+    timer.start();
 
     // Iterate over nodes and issuing corresponding rpc requests
+    std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
     auto j = 0;
     for (const auto& indices : indices_per_node) {
         tl::provider_handle& ph = provider_handles[indices.first];
-        auto response = get_samples_procedure.on(ph).async(client_mem.bulk, indices.second, j);
+        auto response = m_client_procedure.on(ph).async(client_mem.bulk, indices.second, j);
         responses.push_back(std::move(response));
 
         j += indices.second.size() * num_samples_per_representative * num_bytes_per_representative;
     }
     ASSERT(responses.size() == indices_per_node.size());
 
-    auto end_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                                m_measure_performance);
-    end_event.synchronize();
-    if (m_measure_performance)
-        m_metrics[i_batch].bulk_prepare_time = cuda::event::time_elapsed_between(start_event, end_event).count();
-    
+    m_metrics[i_batch].bulk_prepare_time = timer.end();
     return indices_per_node.size();
 }
 
 /**
- * 
+ * Wait for rpc requests to resolve. The returned data is written in a buffer
+ * representing the minibatch to augment.
  */
 void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& responses, queue_item_t &batch) {
-    auto start_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                              m_measure_performance,
-                                              cuda::event::not_interprocess);
+    Timer timer(m_measure_performance);
+#ifndef WITHOUT_CUDA
+    timer.setStream(&m_streams[0]);
+#endif
+    timer.start();
 
     // Waiting for rpc requests to resolve
     for (size_t i = 0; i < responses.size(); i++) {
@@ -411,11 +422,7 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
         }
     }
 
-    auto end_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                                m_measure_performance);
-    end_event.synchronize();
-    if (m_measure_performance)
-        m_metrics[i_batch].rpcs_resolve_time = cuda::event::time_elapsed_between(start_event, end_event).count();
+    m_metrics[i_batch].rpcs_resolve_time = timer.end();
 }
 
 /**
@@ -423,9 +430,11 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
  */
 void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size) {
     nvtx3::scoped_range r{"copy_exposed_buffer_to_aug_batch"};
-    auto start_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                                  m_measure_performance,
-                                                  cuda::event::not_interprocess);
+    Timer timer(m_measure_performance);
+#ifndef WITHOUT_CUDA
+    timer.setStream(&m_streams[0]);
+#endif
+    timer.start();
 
     auto nbytes = num_samples_per_representative * num_bytes_per_representative;
 
@@ -440,24 +449,22 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t 
     }
 
 #ifndef WITHOUT_CUDA
-    ASSERT(cudaMemcpyAsync(target,
-                      client_mem.buffer->data_ptr(),
-                      count,
-                      cudaMemcpyDefault,
-                      m_streams[0].handle()
+    ASSERT(cudaMemcpyAsync(
+        target,
+        client_mem.buffer->data_ptr(),
+        count,
+        cudaMemcpyDefault,
+        m_streams[0].handle()
     ) == cudaSuccess);
 #else
-    std::memcpy(target,
-                client_mem.buffer->data_ptr(),
-                count
+    std::memcpy(
+        target,
+        client_mem.buffer->data_ptr(),
+        count
     );
 #endif
 
-    auto end_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                                m_measure_performance);
-    end_event.synchronize();
-    if (m_measure_performance)
-        m_metrics[i_batch].representatives_copy_time = cuda::event::time_elapsed_between(start_event, end_event).count();
+    m_metrics[i_batch].representatives_copy_time = timer.end();
 }
 
 /**
@@ -495,8 +502,11 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
 
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
     nvtx3::scoped_range r{"populate_rehearsal_buffer"};
-    auto start_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                                  m_measure_performance);
+    Timer timer(m_measure_performance);
+#ifndef WITHOUT_CUDA
+    timer.setStream(&m_streams[0]);
+#endif
+    timer.start();
 
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
@@ -522,11 +532,12 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 #ifndef WITHOUT_CUDA
         size_t j = N * label + index;
         ASSERT(j < K * N * num_samples_per_representative);
-        ASSERT(cudaMemcpyAsync((char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * j,
-                        (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
-                        num_samples_per_representative * num_bytes_per_representative,
-                        cudaMemcpyDefault,
-                        m_streams[0].handle()
+        ASSERT(cudaMemcpyAsync(
+            (char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * j,
+            (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
+            num_samples_per_representative * num_bytes_per_representative,
+            cudaMemcpyDefault,
+            m_streams[0].handle()
         ) == cudaSuccess);
 #else
         for (size_t r = 0; r < num_samples_per_representative; r++) {
@@ -536,17 +547,13 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         }
 #endif
         if (index >= rehearsal_metadata[label].first) {
-            rehearsal_size++;
+            m_rehearsal_size++;
             rehearsal_metadata[label].first++;
         }
         rehearsal_counts[label]++;
     }
 
-    auto end_event = m_streams[0].enqueue.event(cuda::event::sync_by_blocking,
-                                                m_measure_performance);
-    end_event.synchronize();
-    if (m_measure_performance)
-        m_metrics[i_batch].buffer_update_time = cuda::event::time_elapsed_between(start_event, end_event).count();
+    m_metrics[i_batch].buffer_update_time = timer.end();
 }
 
 /**
@@ -556,7 +563,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 void distributed_stream_loader_t::update_representative_weights(int num_representatives, int batch_size) {
     nvtx3::scoped_range r{"update_representative_weights"};
 
-    float weight = (float) batch_size / (float) (num_representatives * rehearsal_size);
+    float weight = (float) batch_size / (float) (num_representatives * m_rehearsal_size);
     for (size_t i = 0; i < rehearsal_metadata.size(); i++) {
         rehearsal_metadata[i].second = std::max(std::log(rehearsal_counts[i] * weight), 1.0f);
     }
@@ -579,7 +586,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     * If a representative is already present for a label, the representative
     * index is appended to repr_indices.
     **/
-    if (rehearsal_size > 0) {
+    if (m_rehearsal_size > 0) {
         for (auto index : indices) {
             size_t rehearsal_class_index = index / N;
             const int num_zeros = std::count_if(rehearsal_metadata.begin(), rehearsal_metadata.end(),
@@ -648,11 +655,12 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
 
         for (size_t i = 0; i < reprs_indices.size(); i++) {
 #ifndef WITHOUT_CUDA
-            ASSERT(cudaMemcpyAsync((char *) server_mem.buffer->data_ptr() + num_bytes_per_representative * o,
-                                   rehearsal_tensor->index({reprs_indices[i]}).data_ptr(),
-                                   num_samples_per_representative * num_bytes_per_representative,
-                                   cudaMemcpyDefault,
-                                   m_streams[0].handle()
+            ASSERT(cudaMemcpyAsync(
+                (char *) server_mem.buffer->data_ptr() + num_bytes_per_representative * o,
+                rehearsal_tensor->index({reprs_indices[i]}).data_ptr(),
+                num_samples_per_representative * num_bytes_per_representative,
+                cudaMemcpyDefault,
+                m_streams[0].handle()
             ) == cudaSuccess);
 #else
             server_mem.buffer->index_put_({o}, rehearsal_tensor->index({reprs_indices[i]}));
@@ -675,12 +683,19 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
  * This is called from Python in a synchronous fashion. We push the incoming
  * data to the request_queue for it to be consumed by the client thread in an
  * asynchronous fashion.
+ *
+ * This version of accumulate corresponds to the `flyweight` buffer
+ * implementation, i.e., use_these_allocated_variables() has been called
+ * before and these given variables will be populated. The resulting
+ * batch.aug_size will have a min value of 0.
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets) {
     nvtx3::scoped_range r{"accumulate"};
 
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
+    if (!m_use_allocated_variables)
+        throw std::runtime_error("You didn't pass variables to augment, so you should call use_these_allocated_variables() before accumulate()");
 
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
@@ -694,6 +709,8 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
  * This is called from Python in a synchronous fashion. We push the incoming
  * data to the request_queue for it to be consumed by the client thread in an
  * asynchronous fashion.
+ *
+ * batch.aug_size will have a min value of the minibatch size defined in Python.
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
                  const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
@@ -710,6 +727,9 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
     request_cond.notify_one();
 }
 
+/**
+ * This function should be called when using the `flyweight` buffer implementation.
+ */
 void distributed_stream_loader_t::use_these_allocated_variables(const torch::Tensor &aug_samples,
                 const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
     alloc_aug_samples = aug_samples;
@@ -748,7 +768,7 @@ void distributed_stream_loader_t::measure_performance(bool state) {
 }
 
 size_t distributed_stream_loader_t::get_rehearsal_size() {
-    return rehearsal_size;
+    return m_rehearsal_size;
 }
 
 std::vector<float> distributed_stream_loader_t::get_metrics(size_t i_batch) {
