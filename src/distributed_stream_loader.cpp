@@ -42,7 +42,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
         // first stream for client, second for server
         std::back_inserter(m_streams), 2,
         [&device]() {
-            return device.create_stream(cuda::stream::async);
+            return device.create_stream(cuda::stream::sync);
         }
     );
 #else
@@ -145,6 +145,8 @@ void distributed_stream_loader_t::start() {
  * This method consumes the data pushed into the request_queue by accumulate(),
  * processes it, samples data from all other servers, and push the new data into
  * the response_queue (which will be consumed in turn by wait()).
+ *
+ * Should be executed in a dedicated thread.
  */
 void distributed_stream_loader_t::async_process() {
     init_receiving_rdma_buffer(client_mem);
@@ -311,15 +313,21 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer(exposed_memory_t &m
 }
 
 /**
- * This functions orchastrates the minibatch augmentation process, by
+ * This function orchestrates the minibatch augmentation process, by
  * performing the following steps:
  *
  * 1) Dispatch rpcs to other processes. This is required by global sampling: a
  * subset of remote representatives are sampled to add diversity to the
  * augmented minibatch being constructed.
- * 2) Wait for rpcs to resolve. Depending if use_these_allocated_variables()
- * has been called before, remote data will be written in the `batch.aug_samples`
- * or `alloc_aug_samples`.
+ *
+ * 2) Wait for rpcs to resolve, and write weights and labels when consumed.
+ * Depending if use_these_allocated_variables() has been called before, remote
+ * data will be written in the `batch.aug_labels`/`batch.aug_weights` or
+ * `alloc_aug_labels`/`alloc_aug_weights`. `dest_labels` and `dest_weights`
+ * point to the correct variable.
+ *
+ * 3) Copy samples that have been written to the exposed memory to the
+ * minibatch to augment `dest_samples`.
  */
 void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_size) {
     nvtx3::scoped_range r{"augment_batch"};
@@ -336,7 +344,7 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch, int batch_s
 }
 
 /**
- *
+ * This functions dispatches rpc requests to get R remote representatives.
  */
 std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses) {
     Timer timer(m_measure_performance);
@@ -363,7 +371,8 @@ std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_res
 
 /**
  * Wait for rpc requests to resolve. The returned data is written in a buffer
- * representing the minibatch to augment.
+ * representing the minibatch to augment, i.e., `batch.aug_samples` or
+ * `alloc_aug_samples`.
  */
 void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& responses, queue_item_t &batch) {
     Timer timer(m_measure_performance);
@@ -413,10 +422,10 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
 }
 
 /**
- * We should copy from the exposed bulk to the minibatch `dest_samples`. The
- * latter has either been passed during the last iteration (`batch.aug_samples`)
- * or has been allocated once at the beginning of the execution
- * (`alloc_aug_samples`).
+ * This function copies data from the exposed bulk to the minibatch
+ * `dest_samples`. The latter has either been passed during the last iteration
+ * (`batch.aug_samples`)  or has been allocated once at the beginning of the
+ * execution (`alloc_aug_samples`).
  */
 void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size) {
     nvtx3::scoped_range r{"copy_exposed_buffer_to_aug_batch"};

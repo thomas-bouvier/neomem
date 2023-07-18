@@ -18,7 +18,7 @@ If these dependencies are installed inside a Spack environment, don't forget to 
 ### Compiling Neomem using CMake
 
 ```console
-cmake . -DPython_EXECUTABLE=/path/to/spack-env/view/bin/python -DWITHOUT_CUDA=0
+cmake . -DPython_ROOT=/path/to/spack-env/view/bin -DWITHOUT_CUDA=0
 make
 ```
 
