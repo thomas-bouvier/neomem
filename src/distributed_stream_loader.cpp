@@ -34,12 +34,6 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
         representative_shape(_representative_shape), buffer_strategy(_buffer_strategy), verbose(_verbose) {
     num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
 
-#ifndef WITHOUT_CUDA
-    init_rehearsal_buffers(true);
-#else
-    init_rehearsal_buffers(false);
-#endif
-
     m_server_procedure = define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
     m_client_procedure = get_engine().define("get_samples");
@@ -52,6 +46,20 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
             register_endpoints(all_endpoints);
         }
     }
+
+    #ifndef WITHOUT_CUDA
+        int rank = 0;
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        m_device = std::make_unique<cuda::device_t>(cuda::device::get(rank % cuda::device::count()));
+
+        m_client_stream_async = std::make_unique<cuda::stream_t>(cuda::stream::create(*m_device.get(), cuda::stream::async));
+        m_client_stream_sync = std::make_unique<cuda::stream_t>(cuda::stream::create(*m_device.get(), cuda::stream::sync));
+        m_server_stream_sync = std::make_unique<cuda::stream_t>(cuda::stream::create(*m_device.get(), cuda::stream::sync));
+
+        init_rehearsal_buffers(true);
+    #else
+        init_rehearsal_buffers(false);
+    #endif
 }
 
 /**
@@ -172,7 +180,7 @@ void distributed_stream_loader_t::async_process() {
             copy_last_batch(batch);
         }
 
-        if (m_augmentation_enabled) 
+        if (m_augmentation_enabled)
             augment_batch(batch);
 
         populate_rehearsal_buffer(batch);
@@ -181,11 +189,11 @@ void distributed_stream_loader_t::async_process() {
 #ifndef WITHOUT_CUDA
         // Wait for all async CUDA copies
         auto event = cuda::event::create(
-            cuda::device::current::get(),
+            *m_device.get(),
             cuda::event::sync_by_blocking,
             cuda::event::dont_record_timings,
             cuda::event::not_interprocess);
-        m_client_stream_async.enqueue.event(event);
+        m_client_stream_async->enqueue.event(event);
         unsigned long int counter = 0;
         while (not event.has_occurred())
             counter++;
@@ -193,6 +201,8 @@ void distributed_stream_loader_t::async_process() {
 
         metadata.clear();
         i_batch++;
+
+        nvtx3::mark("iteration has been processed in async_process");
 
         lock.lock();
         response_queue.emplace_back(batch);
@@ -217,19 +227,19 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch) {
         (char *) batch.aug_samples.data_ptr(),
         batch.samples.data_ptr(),
         batch.get_size() * num_bytes_per_representative,
-        m_client_stream_async
+        *m_client_stream_async
     );
     cuda::memory::async::copy(
         (char *) batch.aug_targets.data_ptr(),
         batch.targets.data_ptr(),
         batch.get_size() * batch.targets.element_size(),
-        m_client_stream_async
+        *m_client_stream_async
     );
     cuda::memory::async::copy(
         (char *) batch.aug_weights.data_ptr(),
         batch.weights.data_ptr(),
         batch.get_size() * batch.weights.element_size(),
-        m_client_stream_async
+        *m_client_stream_async
     );
 #else
     std::memcpy(
@@ -377,13 +387,13 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
                     dest_targets->data_ptr<long int>() + batch.aug_size,
                     label,
                     sizeof(*label),
-                    m_client_stream_async
+                    *m_client_stream_async
                 );
                 cuda::memory::async::copy(
                     dest_weights->data_ptr<float>() + batch.aug_size,
                     weight,
                     sizeof(*weight),
-                    m_client_stream_async
+                    *m_client_stream_async
                 );
 #else
                 dest_targets->index_put_({batch.aug_size}, *label);
@@ -416,7 +426,7 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t 
         (char *) dest_samples->data_ptr() + batch.m_augmentation_mark * nbytes,
         client_mem.buffer->data_ptr(),
         count,
-        m_client_stream_async
+        *m_client_stream_async
     );
 #else
     std::memcpy(
@@ -462,11 +472,15 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
     return indices_per_node;
 }
 
+/*
+ * Sample C random elements from the given batch to populate the rehearsal
+ * buffer.
+ */
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
     nvtx3::scoped_range r{"populate_rehearsal_buffer"};
     Timer timer(m_measure_performance);
 #ifndef WITHOUT_CUDA
-    timer.setStream(&m_client_stream_sync);
+    timer.setStream(m_client_stream_sync.get());
 #endif
     timer.start();
 
@@ -497,7 +511,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
             (char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * j,
             (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
             num_samples_per_representative * num_bytes_per_representative,
-            m_client_stream_sync
+            *m_client_stream_sync
         );
 #else
         for (size_t r = 0; r < num_samples_per_representative; r++) {
@@ -515,7 +529,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 
 #ifndef WITHOUT_CUDA
     // The rehearsal_mutex is still held
-    m_client_stream_sync.synchronize();
+    m_client_stream_sync->synchronize();
 #endif
 
     m_metrics[i_batch].buffer_update_time = timer.end();
@@ -628,7 +642,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
                 (char *) server_mem.buffer->data_ptr() + num_bytes_per_representative * o,
                 rehearsal_tensor->index({reprs_indices[i]}).data_ptr(),
                 num_samples_per_representative * num_bytes_per_representative,
-                m_server_stream_sync
+                *m_server_stream_sync
             );
 #else
             server_mem.buffer->index_put_({o}, rehearsal_tensor->index({reprs_indices[i]}));
@@ -646,7 +660,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
 
 #ifndef WITHOUT_CUDA
     // The rehearsal_mutex is still held
-    m_server_stream_sync.synchronize();
+    m_server_stream_sync->synchronize();
 #endif
 
     req.respond(metadata);

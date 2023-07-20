@@ -85,9 +85,10 @@ protected:
     std::map<int, metrics_t> m_metrics;
 
 #ifndef WITHOUT_CUDA
-    cuda::stream_t m_client_stream_async = cuda::device::current::get().create_stream(cuda::stream::async);
-    cuda::stream_t m_client_stream_sync = cuda::device::current::get().create_stream(cuda::stream::sync);
-    cuda::stream_t m_server_stream_sync = cuda::device::current::get().create_stream(cuda::stream::sync);
+    std::unique_ptr<cuda::device_t> m_device;
+    std::unique_ptr<cuda::stream_t> m_client_stream_async;
+    std::unique_ptr<cuda::stream_t> m_client_stream_sync;
+    std::unique_ptr<cuda::stream_t> m_server_stream_sync;
 #endif
 
     bool started = false;
