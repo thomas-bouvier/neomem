@@ -84,7 +84,9 @@ if __name__ == "__main__":
     ##### `flyweight` buffer
     print("========================flyweight")
 
-    engine2 = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False,
+    engine2 = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
+    dsl2 = neomem.DistributedStreamLoader(
+        engine2,
         neomem.Classification, K, N, R, C,
         ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
     )

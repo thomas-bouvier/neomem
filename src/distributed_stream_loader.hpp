@@ -2,6 +2,7 @@
 #define __DISTRIBUTED_STREAM_LOADER
 
 #include "engine_loader.hpp"
+#include "queue_item.hpp"
 #include "metrics.hpp"
 
 #include <torch/extension.h>
@@ -19,19 +20,6 @@ namespace tl = thallium;
 
 enum Task { Classification, Reconstruction };
 enum BufferStrategy { NoBuffer, CPUBuffer, CUDABuffer };
-
-struct queue_item_t {
-    int aug_size = 0;
-    torch::Tensor samples, targets, aug_samples, aug_targets, aug_weights;
-    int m_augmentation_mark = 0;
-
-    queue_item_t(const torch::Tensor &_samples, const torch::Tensor &_targets) :
-        samples(_samples), targets(_targets) { }
-    queue_item_t(const torch::Tensor &_samples, const torch::Tensor &_targets,
-            const torch::Tensor &_aug_samples, const torch::Tensor &_aug_targets, const torch::Tensor &_aug_weights) :
-        samples(_samples), targets(_targets), aug_samples(_aug_samples), aug_targets(_aug_targets), aug_weights(_aug_weights) { }
-    queue_item_t() { }
-};
 
 struct exposed_memory_t {
     std::vector<std::pair<void*, std::size_t>> segments;
@@ -52,7 +40,7 @@ public:
         unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
         BufferStrategy _buffer_strategy,
         bool discover_endpoints = false, bool _verbose = false);
-    ~distributed_stream_loader_t();
+    ~distributed_stream_loader_t() noexcept;
 
     void register_endpoints(const std::map<std::string, int>& endpoints);
     void start();
@@ -72,7 +60,7 @@ protected:
     engine_loader_t engine_loader;
 
     void init_receiving_rdma_buffer(exposed_memory_t &mem);
-    void copy_last_batch(queue_item_t &batch, int batch_size);
+    void copy_last_batch(queue_item_t &batch);
     std::size_t dispatch_rpcs(std::vector<tl::async_response> &responses);
     void resolve_rpcs(std::vector<tl::async_response> &responses, queue_item_t &batch);
 
@@ -97,7 +85,9 @@ protected:
     std::map<int, metrics_t> m_metrics;
 
 #ifndef WITHOUT_CUDA
-    std::vector<cuda::stream_t> m_streams;
+    cuda::stream_t m_client_stream_async = cuda::device::current::get().create_stream(cuda::stream::async);
+    cuda::stream_t m_client_stream_sync = cuda::device::current::get().create_stream(cuda::stream::sync);
+    cuda::stream_t m_server_stream_sync = cuda::device::current::get().create_stream(cuda::stream::sync);
 #endif
 
     bool started = false;
@@ -129,15 +119,17 @@ protected:
 
     void async_process();
 
-    void augment_batch(queue_item_t &batch, int batch_size);
-    void copy_exposed_buffer_to_aug_batch(queue_item_t &batch, int batch_size);
+    void augment_batch(queue_item_t &batch);
+    void copy_exposed_buffer_to_aug_batch(queue_item_t &batch);
     void populate_rehearsal_buffer(const queue_item_t& batch);
-    void update_representative_weights(int num_representatives, int batch_size);
+    void update_representative_weights(const queue_item_t& batch, int num_representatives);
 
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
     void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices, int offset);
 
     exposed_memory_t client_mem, server_mem;
+
+    std::vector<std::vector<std::tuple<int, float, size_t>>> metadata;
 };
 
 #endif

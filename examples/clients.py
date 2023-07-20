@@ -101,7 +101,6 @@ if __name__ == "__main__":
             size2 = dsl2.wait()
 
             for j in range(B, size1):
-                print(j, aug_labels[j], aug_samples[j, 0, 0, 0])
                 assert(aug_labels[j] == aug_samples[j, 0, 0, 0])
 
     """

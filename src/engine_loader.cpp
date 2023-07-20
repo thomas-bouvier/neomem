@@ -4,9 +4,11 @@ engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_i
     : server_address(address), server_id(provider_id), cuda_rdma(_cuda_rdma) {
     struct hg_init_info hii;
     memset(&hii, 0, sizeof(hii));
-    if (cuda_rdma)
+    if (cuda_rdma) {
         hii.na_init_info.request_mem_device = true;
+    }
 
+    // Use a progress thread to avoid collisions (hangs) with MPI collectives
     server_engine = tl::engine(address, THALLIUM_SERVER_MODE, true, POOL_SIZE, &hii);
 
     std::cout << "Server running at address " << server_engine.self()
