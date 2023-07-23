@@ -218,7 +218,7 @@ void distributed_stream_loader_t::async_process() {
 void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch) {
     nvtx3::scoped_range r{"copy_last_batch"};
     // async copies
-    Timer timer(m_measure_performance);
+    Timer timer(*m_device.get(), m_measure_performance);
     timer.start();
 
     // Copy incoming samples into the next augmented minibatch
@@ -343,7 +343,7 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch) {
  * This functions dispatches rpc requests to get R remote representatives.
  */
 std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses) {
-    Timer timer(m_measure_performance);
+    Timer timer(*m_device.get(), m_measure_performance);
     timer.start();
 
     // Iterate over nodes and issuing corresponding rpc requests
@@ -368,7 +368,7 @@ std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_res
  * `alloc_aug_samples`.
  */
 void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& responses, queue_item_t &batch) {
-    Timer timer(m_measure_performance);
+    Timer timer(*m_device.get(), m_measure_performance);
     timer.start();
 
     for (size_t i = 0; i < responses.size(); i++) {
@@ -415,7 +415,7 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
  */
 void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t &batch) {
     nvtx3::scoped_range r{"copy_exposed_buffer_to_aug_batch"};
-    Timer timer(m_measure_performance);
+    Timer timer(*m_device.get(), m_measure_performance);
     timer.start();
 
     auto nbytes = num_samples_per_representative * num_bytes_per_representative;
@@ -478,7 +478,7 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
  */
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
     nvtx3::scoped_range r{"populate_rehearsal_buffer"};
-    Timer timer(m_measure_performance);
+    Timer timer(*m_device.get(), m_measure_performance);
 #ifndef WITHOUT_CUDA
     timer.setStream(m_client_stream_sync.get());
 #endif
