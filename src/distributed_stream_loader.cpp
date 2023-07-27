@@ -275,13 +275,14 @@ void distributed_stream_loader_t::async_process() {
 #endif
 
         /*
+        // If using memcpy in copy_last_batch, this should be moved there
         for (size_t j = 0; j < batch.get_size(); j++) {
             ASSERT(torch::equal(batch.aug_samples[j][0][0][0], batch.aug_targets[j].to(torch::kFloat32)));
         }
-        */
         for (int j = 0; j < batch.aug_size; j++) {
             ASSERT(torch::equal(batch.aug_samples[j][0][0][0], batch.aug_targets[j].to(torch::kFloat32)));
         }
+        */
 
         metadata.clear();
         i_batch++;
@@ -740,7 +741,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     if (c > 0) {
 #ifndef WITHOUT_CUDA
         // The rehearsal_mutex is still held
-        //cudaStreamSynchronize(m_streams[2]);
+        cudaStreamSynchronize(m_streams[2]);
 #endif
         auto size = c * num_samples_per_representative * num_bytes_per_representative;
         server_mem.bulk(0, size) >> b(offset, size).on(req.get_endpoint());
