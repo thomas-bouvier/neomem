@@ -2,9 +2,11 @@
 #include "mpi_utils.hpp"
 #include "timer.hpp"
 
-#include <tuple>
+#include <algorithm>
 #include <chrono>
 #include <stdexcept>
+#include <tuple>
+#include <utility>
 
 #include <cereal/types/string.hpp>
 #include <nvtx3/nvtx3.hpp>
@@ -13,6 +15,31 @@
 
 
 using namespace torch::indexing;
+
+#ifndef WITHOUT_CUDA
+
+#define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
+template <typename T>
+void check(T err, const char* const func, const char* const file, const int line) {
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA Runtime Error at: " << file << ":" << line << std::endl;
+        std::cerr << cudaGetErrorString(err) << " " << func << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+#define CHECK_LAST_CUDA_ERROR() checkLast(__FILE__, __LINE__)
+void checkLast(const char* const file, const int line) {
+    cudaError_t err{cudaGetLastError()};
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA Runtime Error at: " << file << ":" << line << std::endl;
+        std::cerr << cudaGetErrorString(err) << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+#endif
+
 
 /**
  * This constructor initializes the provider. This class is both a server and a
@@ -47,46 +74,51 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
         }
     }
 
-    #ifndef WITHOUT_CUDA
-        int rank = 0;
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-        m_device = std::make_unique<cuda::device_t>(cuda::device::get(rank % cuda::device::count()));
+    {
+        MPI_Comm local_comm;
+        MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, m_rank, MPI_INFO_NULL, &local_comm);
+        MPI_Comm_rank(local_comm, &m_local_rank);
+        MPI_Comm_free(&local_comm);
+    }
 
-        m_client_stream_async = std::make_unique<cuda::stream_t>(cuda::stream::create(*m_device.get(), cuda::stream::async));
-        m_client_stream_sync = std::make_unique<cuda::stream_t>(cuda::stream::create(*m_device.get(), cuda::stream::sync));
-        m_server_stream_sync = std::make_unique<cuda::stream_t>(cuda::stream::create(*m_device.get(), cuda::stream::sync));
+#ifndef WITHOUT_CUDA
+    int num_devices = 0;
+    cudaGetDeviceCount(&num_devices);
+    cudaSetDevice(m_local_rank % num_devices);
 
-        init_rehearsal_buffers(true);
-    #else
-        init_rehearsal_buffers(false);
-    #endif
+    DBG("[" << engine_loader.get_id() << "] Setting CUDA device " << m_local_rank % num_devices);
+
+    CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[0])); // streamNonBlockingSync causes a sync issue
+    // To reproduce, use only async copy functions, except in copy_last_batch.
+    CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[1]));
+    CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[2]));
+#endif
+
+    init_rehearsal_buffers(torch::cuda::is_available());
+    init_receiving_rdma_buffer();
 }
 
 /**
  * Contact all other nodes to get their endpoints. The returned dictionary maps
  * endpoints (keys) to provider ids (values).
  */
-std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() const {
+std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() {
     nvtx3::scoped_range r{"gather_endpoints"};
 
-    int rank, num_workers = 0;
     // MPI has maybe been initialized by horovodrun
     int mpi_initialized = true;
-    bool was_initialized = true;
     MPI_Initialized(&mpi_initialized);
     if (!mpi_initialized) {
         MPI_Init(NULL, NULL);
-        was_initialized = false;
+    } else {
+        mpi_was_initialized = true;
     }
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &num_workers);
+    MPI_Comm_rank(MPI_COMM_WORLD, &m_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &m_num_workers);
 
     std::map<std::string, int> endpoints = {{get_engine().self(), engine_loader.get_id()}};
-    auto all_endpoints = gather_dictionary(endpoints, num_workers);
+    auto all_endpoints = gather_dictionary(endpoints, m_num_workers);
 
-    if (!was_initialized) {
-        MPI_Finalize();
-    }
     return all_endpoints;
 }
 
@@ -98,20 +130,14 @@ void distributed_stream_loader_t::register_endpoints(const std::map<std::string,
         tl::endpoint server = get_engine().lookup(endpoint.first);
         provider_handles.emplace_back(tl::provider_handle(server, endpoint.second));
     }
+    ASSERT(static_cast<int>(provider_handles.size()) == m_num_workers);
 }
 
 void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
     nvtx3::scoped_range r{"init_rehearsal_buffer"};
 
     auto size = K * N * num_samples_per_representative;
-    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-
-#ifndef WITHOUT_CUDA
-    options = options.pinned_memory(pin_buffers);
-#else
-    if (pin_buffers)
-        throw std::invalid_argument("Pinning the rehearsal buffer requires CUDA");
-#endif
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(pin_buffers);
 
     auto rehearsal_shape = representative_shape;
     rehearsal_shape.insert(rehearsal_shape.begin(), size);
@@ -119,17 +145,75 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
     ASSERT(rehearsal_tensor->is_contiguous());
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 1.0));
     rehearsal_counts.insert(rehearsal_counts.begin(), K, 0);
-    DBG("Distributed buffer memory allocated!");
+    DBG("[" << engine_loader.get_id() << "] Distributed buffer memory allocated!");
+
 
     auto shape = representative_shape;
     shape.insert(shape.begin(), R);
     server_mem.buffer = new torch::Tensor(torch::empty(shape, options));
     server_mem.segments.emplace_back(server_mem.buffer->data_ptr(), R * num_samples_per_representative * num_bytes_per_representative);
     server_mem.bulk = get_engine().expose(server_mem.segments, tl::bulk_mode::read_only);
+
+    /*
+    server_mem.buffer.resize(std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>()) * R, -1.0);
+    server_mem.segments.emplace_back(server_mem.buffer.data(), R * num_samples_per_representative * num_bytes_per_representative);
+    server_mem.bulk = get_engine().expose(server_mem.segments, tl::bulk_mode::read_only);
+    */
 }
 
 /**
- *
+ * Should return a bulk, taking into account:
+ * - the 'allocated policy'
+ * - the buffer strategy, NoBuffer, CPUBuffer or CUDABuffer
+ */
+void distributed_stream_loader_t::init_receiving_rdma_buffer() {
+    nvtx3::scoped_range r{"init_receiving_rdma_buffer"};
+
+    if (buffer_strategy == NoBuffer) {
+        if (!m_use_allocated_variables)
+            throw std::invalid_argument("NoBuffer policy is selected, so we should write in a variable declared on the Python side, which you didn't provide (or use CPUBuffer or CUDABuffer)");
+        if (!engine_loader.is_cuda_rdma_enabled() && alloc_aug_samples.is_cuda())
+            throw std::invalid_argument("NoBuffer policy is selected, but cuda+verbs is not supported");
+
+        client_mem.buffer = &alloc_aug_samples;
+    } else {
+        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+        if (buffer_strategy == CUDABuffer) {
+            if (!engine_loader.is_cuda_rdma_enabled())
+                throw std::invalid_argument("CUDABuffer policy is selected, but cuda+verbs is not supported");
+
+            options = options.device(torch::kCUDA);
+        } else {
+#ifndef WITHOUT_CUDA
+            options = options.pinned_memory(true);
+#endif
+        }
+
+        auto shape = representative_shape;
+        shape.insert(shape.begin(), R);
+        client_mem.buffer = new torch::Tensor(torch::ones(shape, options));
+        /*
+        client_mem.buffer.resize(std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>()) * R, -1.0);
+        */
+    }
+
+    struct hg_bulk_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    if (client_mem.buffer->is_cuda())
+        attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_CUDA;
+    else
+        attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
+
+    client_mem.segments.emplace_back(client_mem.buffer->data_ptr(), R * num_samples_per_representative * num_bytes_per_representative);
+    client_mem.bulk = get_engine().expose(client_mem.segments, tl::bulk_mode::write_only, attr);
+    /*
+    client_mem.segments.emplace_back(client_mem.buffer.data(), R * num_samples_per_representative * num_bytes_per_representative);
+    client_mem.bulk = get_engine().expose(client_mem.segments, tl::bulk_mode::write_only, attr);
+    */
+}
+
+/**
+ * Start the thread disptaching rpcs to prepare the next augmented minibatch.
  */
 void distributed_stream_loader_t::start() {
     // The thread executing the actual client issuing rpcs
@@ -148,8 +232,6 @@ void distributed_stream_loader_t::start() {
  * Should be executed in a dedicated thread.
  */
 void distributed_stream_loader_t::async_process() {
-    init_receiving_rdma_buffer(client_mem);
-
     while (true) {
         nvtx3::mark("while start in async_process");
 
@@ -158,9 +240,10 @@ void distributed_stream_loader_t::async_process() {
         while (request_queue.empty())
             request_cond.wait(lock);
         auto batch = request_queue.front();
-        batch.aug_size = 0;
         request_queue.pop_front();
         lock.unlock();
+
+        DBG("[" << engine_loader.get_id() << "] Consuming a batch!");
 
         nvtx3::mark("new iteration in async_process");
 
@@ -188,16 +271,17 @@ void distributed_stream_loader_t::async_process() {
 
 #ifndef WITHOUT_CUDA
         // Wait for all async CUDA copies
-        auto event = cuda::event::create(
-            *m_device.get(),
-            cuda::event::sync_by_blocking,
-            cuda::event::dont_record_timings,
-            cuda::event::not_interprocess);
-        m_client_stream_async->enqueue.event(event);
-        unsigned long int counter = 0;
-        while (not event.has_occurred())
-            counter++;
+        cudaStreamSynchronize(m_streams[0]);
 #endif
+
+        /*
+        for (size_t j = 0; j < batch.get_size(); j++) {
+            ASSERT(torch::equal(batch.aug_samples[j][0][0][0], batch.aug_targets[j].to(torch::kFloat32)));
+        }
+        */
+        for (int j = 0; j < batch.aug_size; j++) {
+            ASSERT(torch::equal(batch.aug_samples[j][0][0][0], batch.aug_targets[j].to(torch::kFloat32)));
+        }
 
         metadata.clear();
         i_batch++;
@@ -215,32 +299,34 @@ void distributed_stream_loader_t::async_process() {
  * Copy incoming sample/target pairs and associated weights to the next
  * augmented minibatch.
  */
-void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch) {
+void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch) {
+    DBG("[" << engine_loader.get_id() << "] Copying last batch!");
+
     nvtx3::scoped_range r{"copy_last_batch"};
-    // async copies
-    Timer timer(*m_device.get(), m_measure_performance);
-    timer.start();
 
     // Copy incoming samples into the next augmented minibatch
 #ifndef WITHOUT_CUDA
-    cuda::memory::async::copy(
+    CHECK_CUDA_ERROR(cudaMemcpyAsync(
         (char *) batch.aug_samples.data_ptr(),
         batch.samples.data_ptr(),
         batch.get_size() * num_bytes_per_representative,
-        *m_client_stream_async
-    );
-    cuda::memory::async::copy(
+        cudaMemcpyDefault,
+        m_streams[0]
+    ));
+    CHECK_CUDA_ERROR(cudaMemcpyAsync(
         (char *) batch.aug_targets.data_ptr(),
         batch.targets.data_ptr(),
         batch.get_size() * batch.targets.element_size(),
-        *m_client_stream_async
-    );
-    cuda::memory::async::copy(
+        cudaMemcpyDefault,
+        m_streams[0]
+    ));
+    CHECK_CUDA_ERROR(cudaMemcpyAsync(
         (char *) batch.aug_weights.data_ptr(),
         batch.weights.data_ptr(),
         batch.get_size() * batch.weights.element_size(),
-        *m_client_stream_async
-    );
+        cudaMemcpyDefault,
+        m_streams[0]
+    ));
 #else
     std::memcpy(
         (char *) batch.aug_samples.data_ptr(),
@@ -259,53 +345,7 @@ void distributed_stream_loader_t::copy_last_batch(queue_item_t &batch) {
     );
 #endif
 
-    batch.aug_size = batch.get_size();
-
-    m_metrics[i_batch].batch_copy_time = timer.end();
-}
-
-/**
- * Should return a bulk, taking into account:
- * - the 'allocated policy'
- * - the buffer strategy, NoBuffer, CPUBuffer or CUDABuffer
- */
-void distributed_stream_loader_t::init_receiving_rdma_buffer(exposed_memory_t &mem) {
-    nvtx3::scoped_range r{"init_receiving_rdma_buffer"};
-
-    if (buffer_strategy == NoBuffer) {
-        if (!m_use_allocated_variables)
-            throw std::invalid_argument("NoBuffer policy is selected, so we should write in a variable declared on the Python side, which you didn't provide (or use CPUBuffer or CUDABuffer)");
-        if (!engine_loader.is_cuda_rdma_enabled() && alloc_aug_samples.is_cuda())
-            throw std::invalid_argument("NoBuffer policy is selected, but cuda+verbs is not supported");
-
-        mem.buffer = &alloc_aug_samples;
-    } else {
-        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-        if (buffer_strategy == CUDABuffer) {
-            if (!engine_loader.is_cuda_rdma_enabled())
-                throw std::invalid_argument("CUDABuffer policy is selected, but cuda+verbs is not supported");
-
-            options = options.device(torch::kCUDA);
-        } else {
-#ifndef WITHOUT_CUDA
-            options = options.pinned_memory(true);
-#endif
-        }
-
-        auto shape = representative_shape;
-        shape.insert(shape.begin(), R);
-        mem.buffer = new torch::Tensor(torch::ones(shape, options));
-    }
-
-    struct hg_bulk_attr attr;
-    memset(&attr, 0, sizeof(attr));
-    if (mem.buffer->is_cuda())
-        attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_CUDA;
-    else
-        attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
-
-    mem.segments.emplace_back(mem.buffer->data_ptr(), R * num_samples_per_representative * num_bytes_per_representative);
-    mem.bulk = get_engine().expose(mem.segments, tl::bulk_mode::write_only, attr);
+    m_metrics[i_batch].batch_copy_time = 0;
 }
 
 /**
@@ -332,19 +372,13 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch) {
     std::vector<tl::async_response> responses;
     dispatch_rpcs(responses);
     resolve_rpcs(responses, batch);
-
-    // Copy representatives
-    if (buffer_strategy != NoBuffer) {
-        copy_exposed_buffer_to_aug_batch(batch);
-    }
 }
 
 /**
- * This functions dispatches rpc requests to get R remote representatives.
+ * This function dispatches rpc requests to get R remote representatives.
  */
 std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses) {
-    Timer timer(*m_device.get(), m_measure_performance);
-    timer.start();
+    DBG("[" << engine_loader.get_id() << "] Dispatching rpcs");
 
     // Iterate over nodes and issuing corresponding rpc requests
     std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
@@ -358,7 +392,7 @@ std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_res
     }
     ASSERT(responses.size() == indices_per_node.size());
 
-    m_metrics[i_batch].bulk_prepare_time = timer.end();
+    m_metrics[i_batch].bulk_prepare_time = 0;
     return indices_per_node.size();
 }
 
@@ -368,33 +402,45 @@ std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_res
  * `alloc_aug_samples`.
  */
 void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& responses, queue_item_t &batch) {
-    Timer timer(*m_device.get(), m_measure_performance);
-    timer.start();
+    DBG("[" << engine_loader.get_id() << "] Resolving rpcs...");
+
+    // Sequence of integers representing sections that have been written,
+    // first element is the memory offset, second is the number of bytes
+    std::vector<std::pair<int, int>> memory_sections;
 
     for (size_t i = 0; i < responses.size(); i++) {
+        // Waiting for rpcs to complete, careful to keep the order!
+        std::vector<std::tuple<int, float, size_t, size_t>> m = responses[i].wait();
         // Store metadata so that it lives long enough for CUDA async transfers
-        std::vector<std::tuple<int, float, size_t>> m = responses[i].wait();
         metadata.push_back(m);
 
         for (const auto &it : metadata.back()) {
-            const size_t* num_targets = &std::get<2>(it);
             const int* label = &std::get<0>(it);
             const float* weight = &std::get<1>(it);
+            const size_t* num_targets = &std::get<2>(it);
+            const size_t* offset = &std::get<3>(it);
+
+            if (*num_targets > 0) {
+                memory_sections.emplace_back(*offset, *num_targets *  num_samples_per_representative * num_bytes_per_representative);
+            }
+
             for (size_t j = 0; j < *num_targets; j++) {
 #ifndef WITHOUT_CUDA
-                cuda::memory::async::copy(
+                CHECK_CUDA_ERROR(cudaMemcpyAsync(
                     // no * batch.element_size() as type is given
                     dest_targets->data_ptr<long int>() + batch.aug_size,
                     label,
                     sizeof(*label),
-                    *m_client_stream_async
-                );
-                cuda::memory::async::copy(
+                    cudaMemcpyDefault,
+                    m_streams[0]
+                ));
+                CHECK_CUDA_ERROR(cudaMemcpyAsync(
                     dest_weights->data_ptr<float>() + batch.aug_size,
                     weight,
                     sizeof(*weight),
-                    *m_client_stream_async
-                );
+                    cudaMemcpyDefault,
+                    m_streams[0]
+                ));
 #else
                 dest_targets->index_put_({batch.aug_size}, *label);
                 dest_weights->index_put_({batch.aug_size}, *weight);
@@ -404,7 +450,44 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
         }
     }
 
-    m_metrics[i_batch].rpcs_resolve_time = timer.end();
+    m_metrics[i_batch].rpcs_resolve_time = 0;
+
+    // Maybe some nodes hadn't any data to return, so we have to prepare an
+    // array of contiguous sections to transfer from receiving buffer to the
+    // augmented minibatch.
+    std::vector<std::pair<int, int>> contiguous_memory_sections = merge_contiguous_memory(memory_sections);
+
+    // Copy representatives
+    if (buffer_strategy != NoBuffer) {
+        copy_exposed_buffer_to_aug_batch(batch, contiguous_memory_sections);
+    }
+}
+
+/**
+ * Returns a vector to keep the same order.
+ */
+std::vector<std::pair<int, int>> distributed_stream_loader_t::merge_contiguous_memory(std::vector<std::pair<int, int>>& sections) const {
+    std::vector<std::pair<int, int>> mergedPairs;
+    if (sections.empty())
+        return mergedPairs;
+
+    // Sort the sections based on the memory offset (first element of the pair)
+    std::sort(sections.begin(), sections.end());
+
+    // Merge contiguous chunks of memory
+    mergedPairs.push_back(sections[0]);
+    for (size_t i = 1; i < sections.size(); ++i) {
+        int prevEnd = mergedPairs.back().first + mergedPairs.back().second;
+        if (sections[i].first == prevEnd) {
+            // Merge the current pair with the previous pair
+            mergedPairs.back().second += sections[i].second;
+        } else {
+            // Non-contiguous, add as a new pair
+            mergedPairs.push_back(sections[i]);
+        }
+    }
+
+    return mergedPairs;
 }
 
 /**
@@ -413,30 +496,34 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
  * (`batch.aug_samples`)  or has been allocated once at the beginning of the
  * execution (`alloc_aug_samples`).
  */
-void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(queue_item_t &batch) {
+void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections) {
     nvtx3::scoped_range r{"copy_exposed_buffer_to_aug_batch"};
-    Timer timer(*m_device.get(), m_measure_performance);
-    timer.start();
 
     auto nbytes = num_samples_per_representative * num_bytes_per_representative;
-    size_t count = (batch.aug_size - batch.m_augmentation_mark) * nbytes;
 
+    auto cumulated_offset = 0;
+    for (const auto& pair : sections) {
+        // First element is the offset in the client exposed memory, second
+        // element is the chunk size in bytes.
 #ifndef WITHOUT_CUDA
-    cuda::memory::async::copy(
-        (char *) dest_samples->data_ptr() + batch.m_augmentation_mark * nbytes,
-        client_mem.buffer->data_ptr(),
-        count,
-        *m_client_stream_async
-    );
+        CHECK_CUDA_ERROR(cudaMemcpyAsync(
+            (char *) dest_samples->data_ptr() + batch.m_augmentation_mark * nbytes + cumulated_offset,
+            (char *) client_mem.buffer->data_ptr() + pair.first,
+            pair.second,
+            cudaMemcpyDefault,
+            m_streams[0]
+        ));
 #else
-    std::memcpy(
-        (char *) dest_samples->data_ptr() + batch.m_augmentation_mark * nbytes,
-        client_mem.buffer->data_ptr(),
-        count
-    );
+        std::memcpy(
+            (char *) dest_samples->data_ptr() + batch.m_augmentation_mark * nbytes + cumulated_offset,
+            (char *) client_mem.buffer->data_ptr() + pair.first,
+            pair.second
+        );
 #endif
+        cumulated_offset += pair.second;
+    }
 
-    m_metrics[i_batch].representatives_copy_time = timer.end();
+    m_metrics[i_batch].representatives_copy_time = 0;
 }
 
 /**
@@ -478,11 +565,6 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
  */
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
     nvtx3::scoped_range r{"populate_rehearsal_buffer"};
-    Timer timer(*m_device.get(), m_measure_performance);
-#ifndef WITHOUT_CUDA
-    timer.setStream(m_client_stream_sync.get());
-#endif
-    timer.start();
 
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
@@ -507,12 +589,13 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 #ifndef WITHOUT_CUDA
         size_t j = N * label + index;
         ASSERT(j < K * N * num_samples_per_representative);
-        cuda::memory::async::copy(
+        CHECK_CUDA_ERROR(cudaMemcpyAsync(
             (char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * j,
             (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
             num_samples_per_representative * num_bytes_per_representative,
-            *m_client_stream_sync
-        );
+            cudaMemcpyDefault,
+            m_streams[1]
+        ));
 #else
         for (size_t r = 0; r < num_samples_per_representative; r++) {
             size_t j = N * label + index + r;
@@ -529,10 +612,10 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 
 #ifndef WITHOUT_CUDA
     // The rehearsal_mutex is still held
-    m_client_stream_sync->synchronize();
+    cudaStreamSynchronize(m_streams[1]);
 #endif
 
-    m_metrics[i_batch].buffer_update_time = timer.end();
+    m_metrics[i_batch].buffer_update_time = 0;
 }
 
 /**
@@ -602,8 +685,8 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         }
     }
 
-    if (verbose) {
-        std::cout << "Sending " << c << "/" << indices.size()  << " representatives from "
+    if (verbose && c > 0) {
+        std::cout << "[" << engine_loader.get_id() << "] Sending " << c << "/" << indices.size()  << " representatives from "
             << samples.size() << " different classes to remote node (endpoint: "
             << req.get_endpoint() << ", writing at offset " << offset << ")" << std::endl;
     }
@@ -627,23 +710,24 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
     **/
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
-    std::vector<std::tuple<int, float, size_t>> metadata;
+    std::vector<std::tuple<int, float, size_t, size_t>> attached_metadata;
     for (const auto &el : samples) {
         int label;
         float weight;
         std::vector<int> reprs_indices;
         std::tie(label, weight, reprs_indices) = el;
 
-        metadata.emplace_back(std::make_tuple(label, weight, reprs_indices.size()));
+        attached_metadata.emplace_back(std::make_tuple(label, weight, reprs_indices.size(), offset + o * num_samples_per_representative * num_bytes_per_representative));
 
         for (size_t i = 0; i < reprs_indices.size(); i++) {
 #ifndef WITHOUT_CUDA
-            cuda::memory::async::copy(
+            CHECK_CUDA_ERROR(cudaMemcpyAsync(
                 (char *) server_mem.buffer->data_ptr() + num_bytes_per_representative * o,
                 rehearsal_tensor->index({reprs_indices[i]}).data_ptr(),
                 num_samples_per_representative * num_bytes_per_representative,
-                *m_server_stream_sync
-            );
+                cudaMemcpyDefault,
+                m_streams[2]
+            ));
 #else
             server_mem.buffer->index_put_({o}, rehearsal_tensor->index({reprs_indices[i]}));
 #endif
@@ -651,19 +735,18 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, tl:
         }
     }
     ASSERT(c == o);
-    ASSERT(samples.size() == metadata.size());
+    ASSERT(samples.size() == attached_metadata.size());
 
     if (c > 0) {
+#ifndef WITHOUT_CUDA
+        // The rehearsal_mutex is still held
+        //cudaStreamSynchronize(m_streams[2]);
+#endif
         auto size = c * num_samples_per_representative * num_bytes_per_representative;
         server_mem.bulk(0, size) >> b(offset, size).on(req.get_endpoint());
     }
 
-#ifndef WITHOUT_CUDA
-    // The rehearsal_mutex is still held
-    m_server_stream_sync->synchronize();
-#endif
-
-    req.respond(metadata);
+    req.respond(attached_metadata);
 }
 
 /**
@@ -774,6 +857,17 @@ distributed_stream_loader_t::~distributed_stream_loader_t() noexcept {
     request_queue.push_back(queue_item_t());
     lock.unlock();
     request_cond.notify_one();
+
+    if (!mpi_was_initialized) {
+        MPI_Finalize();
+    }
+
+#ifndef WITHOUT_CUDA
+    for (int i = 0; i < 3; ++i) {
+        cudaStreamSynchronize(m_streams[i]);
+        cudaStreamDestroy(m_streams[i]);
+    }
+#endif
 
     get_engine().wait_for_finalize();
 }

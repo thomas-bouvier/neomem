@@ -25,6 +25,7 @@ struct queue_item_t {
         samples(_samples), targets(_targets), aug_samples(_aug_samples), aug_targets(_aug_targets), aug_weights(_aug_weights) {
             ASSERT(targets.dim() == 1 && samples.sizes()[0] == targets.sizes()[0]);
             size = samples.sizes()[0];
+            aug_size = size;
 
             ASSERT(aug_samples.dim() > 0 && aug_targets.dim() == 1);
             auto actual_R = aug_samples.sizes()[0] - size;

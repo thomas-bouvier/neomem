@@ -2,10 +2,13 @@
 #include <iostream>
 #include <tuple>
 
+#include "mpi.h"
+
 #include "engine_loader.hpp"
 #include "distributed_stream_loader.hpp"
 #include "debug.hpp"
 #define ___ASSERT
+#define ___DBG
 
 unsigned int K = 10;
 unsigned int N = 10;
@@ -14,46 +17,76 @@ unsigned int C = 5;
 int64_t seed = 42;
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <server_address> <server_id> [.. <address> <provider_id>]" << std::endl;
-        exit(0);
-    }
-
-    std::string server_address = argv[1];
-    uint16_t server_id = atoi(argv[2]);
-
-    std::map<std::string, int> endpoints;
-    for (int i = 3; i < argc; i += 2) {
-        auto endpoint = std::make_pair<>(std::string(argv[i]), atoi(argv[i + 1]));
-        endpoints.insert(endpoint);
-        std::cout << "Endpoint " << endpoint.first << ", " << endpoint.second << std::endl;
-    }
-
+    bool mpi = false;
+    std::string server_address;
+    int server_id;
     bool discover_endpoints = true;
-    std::string choice;
-    std::cout << "Discover endpoints via MPI? ";
-    std::cin >> choice;
-    if (choice == "no") {
-        while (true) {
-            discover_endpoints = false;
-            std::string address;
-            int provider_id;
-            std::cout << "Endpoint to sample from (local endpoint is NOT already-included)? ";
-            std::cin >> address;
-            if (address == "no") break;
-            std::cin >> provider_id;
-            auto endpoint = std::make_pair<>(address, provider_id);
+    std::map<std::string, int> endpoints;
+
+    // Check if --mpi option is provided
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--mpi") {
+            mpi = true;
+            break;
+        }
+    }
+
+    if (mpi) {
+        int rank, num_workers = 0;
+        // MPI has maybe been initialized by horovodrun
+        int mpi_initialized = true;
+        MPI_Initialized(&mpi_initialized);
+        if (!mpi_initialized)
+            MPI_Init(NULL, NULL);
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &num_workers);
+
+        server_address = "na+sm";
+        server_id = rank;
+    } else {
+        if (argc < 3) {
+            std::cerr << "Usage: " << argv[0] << " <server_address> <server_id> [.. <address> <provider_id>]" << std::endl;
+            exit(0);
+        }
+
+        server_address = argv[1];
+        server_id = atoi(argv[2]);
+
+        for (int i = 3; i < argc; i += 2) {
+            auto endpoint = std::make_pair<>(std::string(argv[i]), atoi(argv[i + 1]));
             endpoints.insert(endpoint);
-            std::cout << "Endpoint " << address << ", " << provider_id << std::endl;
-            std::cin.clear();
+            std::cout << "Endpoint " << endpoint.first << ", " << endpoint.second << std::endl;
+        }
+
+        std::string choice;
+        std::cout << "Discover endpoints via MPI? ";
+        std::cin >> choice;
+        if (choice == "no") {
+            while (true) {
+                discover_endpoints = false;
+                std::string address;
+                int provider_id;
+                std::cout << "Endpoint to sample from (local endpoint is NOT already-included)? ";
+                std::cin >> address;
+                if (address == "no") break;
+                std::cin >> provider_id;
+                auto endpoint = std::make_pair<>(address, provider_id);
+                endpoints.insert(endpoint);
+                std::cout << "Endpoint " << address << ", " << provider_id << std::endl;
+                std::cin.clear();
+            }
         }
     }
 
     engine_loader_t engine(server_address, server_id);
     distributed_stream_loader_t dsl(engine, Classification, K, N, R, C, seed, 1, {3, 224, 224}, CPUBuffer, discover_endpoints, true);
-    dsl.register_endpoints(endpoints);
+    if (!mpi) {
+        dsl.register_endpoints(endpoints);
+    }
     dsl.enable_augmentation(true);
     dsl.start();
+
+    MPI_Barrier(MPI_COMM_WORLD);
 
     torch::DeviceType device_type;
     if (torch::cuda::is_available()) {
@@ -83,6 +116,8 @@ int main(int argc, char** argv) {
         size_t size = dsl.wait();
         std::cout << "Received " << size - N << std::endl;
 
+        MPI_Barrier(MPI_COMM_WORLD);
+
         for (size_t j = 0; j < size; j++) {
             if (j < N) {
                 int pixel = i % K;
@@ -90,7 +125,12 @@ int main(int argc, char** argv) {
             } else {
                 ASSERT(!torch::equal(aug_samples[j], torch::full({3, 224, 224}, -1, torch::TensorOptions().dtype(torch::kFloat32).device(device_type))));
             }
+            ASSERT(torch::equal(aug_samples[j][0][0][0], aug_labels[j].to(torch::kFloat32)));
         }
+    }
+
+    if (mpi) {
+        MPI_Finalize();
     }
 
     return 0;

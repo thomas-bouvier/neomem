@@ -24,6 +24,9 @@ enum BufferStrategy { NoBuffer, CPUBuffer, CUDABuffer };
 struct exposed_memory_t {
     std::vector<std::pair<void*, std::size_t>> segments;
     torch::Tensor* buffer = nullptr;
+    /*
+    std::vector<float> buffer;
+    */
     tl::bulk bulk;
 
     exposed_memory_t() { }
@@ -59,8 +62,10 @@ public:
 protected:
     engine_loader_t engine_loader;
 
-    void init_receiving_rdma_buffer(exposed_memory_t &mem);
-    void copy_last_batch(queue_item_t &batch);
+    void init_rehearsal_buffers(bool pin_buffers);
+    void init_receiving_rdma_buffer();
+
+    void copy_last_batch(const queue_item_t &batch);
     std::size_t dispatch_rpcs(std::vector<tl::async_response> &responses);
     void resolve_rpcs(std::vector<tl::async_response> &responses, queue_item_t &batch);
 
@@ -85,10 +90,12 @@ protected:
     std::map<int, metrics_t> m_metrics;
 
 #ifndef WITHOUT_CUDA
-    std::unique_ptr<cuda::device_t> m_device;
+    cudaStream_t m_streams[3];
+    /*
     std::unique_ptr<cuda::stream_t> m_client_stream_async;
     std::unique_ptr<cuda::stream_t> m_client_stream_sync;
     std::unique_ptr<cuda::stream_t> m_server_stream_sync;
+    */
 #endif
 
     bool started = false;
@@ -115,13 +122,17 @@ protected:
     std::vector<tl::provider_handle> provider_handles;
     tl::remote_procedure m_client_procedure, m_server_procedure;
 
-    std::map<std::string, int> gather_endpoints() const;
-    void init_rehearsal_buffers(bool pin_buffers);
+    std::map<std::string, int> gather_endpoints();
+    bool mpi_was_initialized = false;
+    int m_rank = -1;
+    int m_local_rank = -1;
+    int m_num_workers = -1;
 
     void async_process();
 
     void augment_batch(queue_item_t &batch);
-    void copy_exposed_buffer_to_aug_batch(queue_item_t &batch);
+    std::vector<std::pair<int, int>> merge_contiguous_memory(std::vector<std::pair<int, int>>& sections) const;
+    void copy_exposed_buffer_to_aug_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections);
     void populate_rehearsal_buffer(const queue_item_t& batch);
     void update_representative_weights(const queue_item_t& batch, int num_representatives);
 
@@ -130,7 +141,7 @@ protected:
 
     exposed_memory_t client_mem, server_mem;
 
-    std::vector<std::vector<std::tuple<int, float, size_t>>> metadata;
+    std::vector<std::vector<std::tuple<int, float, size_t, size_t>>> metadata;
 };
 
 #endif
