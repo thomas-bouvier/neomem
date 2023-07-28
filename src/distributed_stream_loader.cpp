@@ -243,7 +243,8 @@ void distributed_stream_loader_t::async_process() {
         request_queue.pop_front();
         lock.unlock();
 
-        DBG("[" << engine_loader.get_id() << "] Consuming a batch!");
+        if (verbose)
+            DBG("[" << engine_loader.get_id() << "] Consuming a batch!");
 
         nvtx3::mark("new iteration in async_process");
 
@@ -301,9 +302,9 @@ void distributed_stream_loader_t::async_process() {
  * augmented minibatch.
  */
 void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch) {
-    DBG("[" << engine_loader.get_id() << "] Copying last batch!");
-
     nvtx3::scoped_range r{"copy_last_batch"};
+    if (verbose)
+        DBG("[" << engine_loader.get_id() << "] Copying last batch!");
 
     // Copy incoming samples into the next augmented minibatch
 #ifndef WITHOUT_CUDA
@@ -379,7 +380,8 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch) {
  * This function dispatches rpc requests to get R remote representatives.
  */
 std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses) {
-    DBG("[" << engine_loader.get_id() << "] Dispatching rpcs");
+    if (verbose)
+        DBG("[" << engine_loader.get_id() << "] Dispatching rpcs");
 
     // Iterate over nodes and issuing corresponding rpc requests
     std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
@@ -403,7 +405,8 @@ std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_res
  * `alloc_aug_samples`.
  */
 void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& responses, queue_item_t &batch) {
-    DBG("[" << engine_loader.get_id() << "] Resolving rpcs...");
+    if (verbose)
+        DBG("[" << engine_loader.get_id() << "] Resolving rpcs...");
 
     // Sequence of integers representing sections that have been written,
     // first element is the memory offset, second is the number of bytes
