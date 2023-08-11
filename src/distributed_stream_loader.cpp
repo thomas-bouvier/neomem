@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -65,6 +66,18 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
     // Register the remote procedure
     m_client_procedure = get_engine().define("get_samples");
 
+    // MPI has maybe been initialized by horovodrun
+    int mpi_initialized = true;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        MPI_Init(NULL, NULL);
+    } else {
+        mpi_was_initialized = true;
+    }
+    MPI_Comm_rank(MPI_COMM_WORLD, &m_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &m_num_workers);
+    m_local_rank = std::atoi(std::getenv("OMPI_COMM_WORLD_LOCAL_RANK"));
+
     // If enabled, get the remote endpoints via the MPI publishing mechanism
     if (discover_endpoints) {
         std::map<std::string, int> all_endpoints = gather_endpoints();
@@ -72,13 +85,6 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
             std::cout << "endpoint size " << all_endpoints.size() << std::endl;
             register_endpoints(all_endpoints);
         }
-    }
-
-    {
-        MPI_Comm local_comm;
-        MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, m_rank, MPI_INFO_NULL, &local_comm);
-        MPI_Comm_rank(local_comm, &m_local_rank);
-        MPI_Comm_free(&local_comm);
     }
 
 #ifndef WITHOUT_CUDA
@@ -104,17 +110,6 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
  */
 std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() {
     nvtx3::scoped_range r{"gather_endpoints"};
-
-    // MPI has maybe been initialized by horovodrun
-    int mpi_initialized = true;
-    MPI_Initialized(&mpi_initialized);
-    if (!mpi_initialized) {
-        MPI_Init(NULL, NULL);
-    } else {
-        mpi_was_initialized = true;
-    }
-    MPI_Comm_rank(MPI_COMM_WORLD, &m_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &m_num_workers);
 
     std::map<std::string, int> endpoints = {{get_engine().self(), engine_loader.get_id()}};
     auto all_endpoints = gather_dictionary(endpoints, m_num_workers);
