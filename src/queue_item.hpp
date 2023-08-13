@@ -17,7 +17,7 @@ struct queue_item_t {
             ASSERT(targets.dim() == 1 && samples.sizes()[0] == targets.sizes()[0]);
             size = samples.sizes()[0];
 
-            weights = torch::ones({size}, targets.options());
+            weights = torch::ones({size}, torch::TensorOptions().dtype(torch::kFloat32).device(samples.device()));
         }
 
     queue_item_t(const torch::Tensor &_samples, const torch::Tensor &_targets,
@@ -32,7 +32,7 @@ struct queue_item_t {
             ASSERT(actual_R > 0 && actual_R + size == aug_targets.sizes()[0]
                 && actual_R + size == aug_weights.sizes()[0]);
 
-            weights = torch::ones({size}, targets.options());
+            weights = torch::ones({size}, aug_weights.options());
         }
 
     queue_item_t() { }
