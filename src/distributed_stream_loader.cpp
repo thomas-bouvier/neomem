@@ -266,8 +266,11 @@ void distributed_stream_loader_t::async_process() {
         //update_representative_weights(R, batch_size);
 
 #ifndef WITHOUT_CUDA
-        // Wait for all async CUDA copies
-        cudaStreamSynchronize(m_streams[0]);
+        {
+            nvtx3::scoped_range r{"backend_overhead"};
+            // Wait for all async CUDA copies
+            cudaStreamSynchronize(m_streams[0]);
+        }
 #endif
 
         /*
