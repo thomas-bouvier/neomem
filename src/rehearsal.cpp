@@ -23,6 +23,9 @@ PYBIND11_MODULE(neomem, m) {
         .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
         .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &,
                  const torch::Tensor &, const torch::Tensor &, const torch::Tensor &>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
+        .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &, std::vector<torch::Tensor>& >(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
+        .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &, std::vector<torch::Tensor>&,
+                 const torch::Tensor &, const torch::Tensor &, const torch::Tensor &, std::vector<torch::Tensor>& >(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
         .def("wait", &distributed_stream_loader_t::wait, py::call_guard<py::gil_scoped_release>())
         .def("get_rehearsal_size", &distributed_stream_loader_t::get_rehearsal_size, py::call_guard<py::gil_scoped_release>())
         .def("get_metrics", &distributed_stream_loader_t::get_metrics, py::call_guard<py::gil_scoped_release>());

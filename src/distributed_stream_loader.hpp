@@ -30,6 +30,34 @@ struct exposed_memory_t {
     tl::bulk bulk;
 
     exposed_memory_t() { }
+
+    // Move constructor
+    exposed_memory_t(exposed_memory_t&& other) noexcept
+        : segments(std::move(other.segments)),
+          buffer(other.buffer),
+          bulk(std::move(other.bulk)) {
+        // Set the buffer in the source object to nullptr to avoid double deletion
+        other.buffer = nullptr;
+    }
+
+    // Move assignment operator
+    exposed_memory_t& operator=(exposed_memory_t&& other) noexcept {
+        // Check for self-assignment
+        if (this != &other) {
+            // Release resources in the current object
+            delete buffer;
+
+            // Move resources from the source object
+            segments = std::move(other.segments);
+            buffer = other.buffer;
+            bulk = std::move(other.bulk);
+
+            // Set the buffer in the source object to nullptr to avoid double deletion
+            other.buffer = nullptr;
+        }
+        return *this;
+    }
+
     ~exposed_memory_t() {
         delete buffer;
     }
@@ -51,9 +79,13 @@ public:
     void accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
             const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
     void accumulate(const torch::Tensor &samples, const torch::Tensor &targets);
+    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets, std::vector<torch::Tensor> &ground_truth,
+            const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, std::vector<torch::Tensor> &aug_ground_truth);
+    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets, std::vector<torch::Tensor> &ground_truth);
     int wait();
 
     void use_these_allocated_variables(const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
+    //void use_these_allocated_variables(const torch::Tensor &aug_samples, std::vector<torch::Tensor> &aug_ground_truth, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
     void enable_augmentation(bool state);
     void measure_performance(bool state);
     size_t get_rehearsal_size();
@@ -107,7 +139,7 @@ protected:
     torch::Tensor alloc_aug_targets;
     torch::Tensor alloc_aug_weights;
 
-    torch::Tensor* dest_samples = nullptr;
+    //torch::Tensor* dest_samples = nullptr;
     torch::Tensor* dest_targets = nullptr;
     torch::Tensor* dest_weights = nullptr;
 
@@ -137,9 +169,11 @@ protected:
     void update_representative_weights(const queue_item_t& batch, int num_representatives);
 
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
-    void get_remote_samples(const tl::request& req, tl::bulk& b, const std::vector<int>& indices, int offset);
+    void get_remote_samples(const tl::request& req, std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int offset);
 
-    exposed_memory_t client_mem, server_mem;
+    std::vector<torch::Tensor*> client_dest_tensors;
+    std::vector<exposed_memory_t> client_mems, server_mems;
+    //exposed_memory_t client_mem, server_mem;
 
     std::vector<std::vector<std::tuple<int, float, size_t, size_t>>> metadata;
 };
