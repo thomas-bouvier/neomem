@@ -158,21 +158,6 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
         DBG("[" << engine_loader.get_id() << "] Server mem " << r << " initialized!");
     }
     DBG("[" << engine_loader.get_id() << "] Server mems initialized!");
-
-    //wip
-    /*
-    shape = representative_shape;
-    shape.insert(shape.begin(), R * num_samples_per_representative);
-    server_mem.buffer = new torch::Tensor(torch::empty(shape, options));
-    server_mem.segments.emplace_back(server_mem.buffer->data_ptr(), R * num_samples_per_representative * num_bytes_per_representative);
-    server_mem.bulk = get_engine().expose(server_mem.segments, tl::bulk_mode::read_only);
-    */
-
-    /*
-    server_mem.buffer.resize(std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>()) * R, -1.0);
-    server_mem.segments.emplace_back(server_mem.buffer.data(), R * num_samples_per_representative * num_bytes_per_representative);
-    server_mem.bulk = get_engine().expose(server_mem.segments, tl::bulk_mode::read_only);
-    */
 }
 
 /**
@@ -628,7 +613,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 
 #ifndef WITHOUT_CUDA
         size_t j = N * label + index;
-        ASSERT(j < K * N * num_samples_per_representative);
+        ASSERT(j < K * N);
         CHECK_CUDA_ERROR(cudaMemcpyAsync(
             (char *) rehearsal_tensor->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j,
             (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
@@ -637,11 +622,9 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
             m_streams[1]
         ));
         for (size_t r = 0; r < num_samples_per_representative - 1; r++) {
-            //j = N * label + index + r + 1;
-            ASSERT(j < K * N * num_samples_per_representative);
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
                 (char *) rehearsal_tensor->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j + num_bytes_per_representative * (r + 1),
-                (char *) batch.ground_truth[r].data_ptr(),
+                (char *) batch.ground_truth[r].data_ptr() + num_bytes_per_representative * i,
                 num_bytes_per_representative,
                 cudaMemcpyDefault,
                 m_streams[1]
@@ -786,17 +769,6 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
                     m_streams[2]
                 ));
             }
-            //wip
-            /*
-            const int index = num_samples_per_representative * reprs_indices[i];
-            CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                (char *) server_mem.buffer->data_ptr() + num_samples_per_representative * num_bytes_per_representative * o,
-                rehearsal_tensor->index({index}).data_ptr(),
-                num_samples_per_representative * num_bytes_per_representative,
-                cudaMemcpyDefault,
-                m_streams[2]
-            ));
-            */
 #else
             server_mem.buffer->index_put_({o}, rehearsal_tensor->index({reprs_indices[i]}));
 #endif
@@ -813,8 +785,6 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
 #endif
         auto size = c * num_bytes_per_representative;
         for (size_t r = 0; r < num_samples_per_representative; r++) {
-            //wip
-            //auto size = c * num_samples_per_representative * num_bytes_per_representative;
             server_mems[r].bulk(0, size) >> client_bulks[r](client_bulks_offset, size).on(req.get_endpoint());
         }
     }
