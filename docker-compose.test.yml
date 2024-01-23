@@ -1,0 +1,49 @@
+version: '2.3'
+services:
+  test-cpu-base:
+    build:
+      context: .
+      dockerfile: Dockerfile.test.cpu
+      args:
+        UBUNTU_VERSION: "22.04"
+        MPI_KIND: None
+        PYTHON_VERSION: "3.10"
+        PYTORCH_VERSION: "1.13.1"
+        NEOMEM_BUILD_FLAGS:
+    privileged: true
+    shm_size: 8gb
+
+  ###############################################
+  # CPU
+  ###############################################
+
+  # Python 3.10, PyTorch 1.13.1
+  test-cpu-openmpi-py3_10-torch1_13_1:
+    extends: test-cpu-base
+    build:
+      args:
+        MPI_KIND: openmpi
+  test-cpu-mpich-py3_10-torch1_13_1:
+    extends: test-cpu-base
+    build:
+      args:
+        MPI_KIND: mpich
+  test-cpu-oneccl-py3_10-torch1_13_1:
+    extends: test-cpu-base
+    build:
+      args:
+        MPI_KIND: ONECCL
+
+  # Python 3.11, PyTorch 2.1.2
+  test-cpu-openmpi-py3_11-torch2_1_2:
+    extends: test-cpu-base
+    build:
+      args:
+        PYTHON_VERSION: "3.11"
+        MPI_KIND: openmpi
+
+  ###############################################
+  # GPU
+  ###############################################
+
+  # to be done

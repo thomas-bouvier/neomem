@@ -7,11 +7,12 @@ C++ data loader with rehearsal for Torch. Based on PyBind11 and [Mochi](https://
 ### Requirements
 
 - Python
+- pybind11
 - PyTorch
-- CUDA
 - MPI
-- libfabric built with CUDA support
 - Thallium
+- libfabric (built with CUDA support, optionally)
+- CUDA (optional)
 
 If these dependencies are installed inside a Spack environment, don't forget to `activate` it before building Neomem.
 

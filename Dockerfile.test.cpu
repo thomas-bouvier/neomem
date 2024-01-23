@@ -1,0 +1,57 @@
+# Build stage with Spack pre-installed and ready to be used
+FROM spack/ubuntu-jammy:latest as builder
+
+ARG MPI_KIND=openmpi
+ARG PYTHON_VERSION=3.10
+ARG PYTORCH_VERSION=1.13.1
+ARG NEOMEM_BUILD_FLAGS=""
+
+RUN git clone https://github.com/mochi-hpc/mochi-spack-packages.git /opt/git/mochi-spack-packages
+
+# What we want to install and how we want to install it
+# is specified in a manifest file (spack.yaml)
+RUN mkdir /opt/spack-environment \
+&&  (echo "spack:" \
+&&   echo "  config:" \
+&&   echo "    install_tree: /opt/software" \
+&&   echo "  repos:" \
+&&   echo "  - /opt/git/mochi-spack-packages" \
+&&   echo "  packages:" \
+&&   echo "    all:" \
+&&   echo "      providers:" \
+&&   echo "        mpi: [$MPI_KIND]" \
+&&   echo "  specs:" \
+&&   echo "  - mochi-thallium ^argobots ^mercury +boostsys +ofi +debug ^libfabric +debug fabrics=tcp,rxm,verbs" \
+&&   echo "  - mpi" \
+&&   echo "  - python@$PYTHON_VERSION" \
+&&   echo "  - nvtx +python" \
+&&   echo "  - py-pip" \
+&&   echo "  - py-pybind11" \
+&&   echo "  - py-torch@$PYTORCH_VERSION ~gloo" \
+&&   echo "  - cmake" \
+&&   echo "  - pkgconfig" \
+&&   echo "  concretizer:" \
+&&   echo "    unify: true" \
+&&   echo "  view: /opt/view") > /opt/spack-environment/spack.yaml
+
+# Install the software, remove unnecessary deps
+RUN cd /opt/spack-environment && spack env activate . && spack install --fail-fast && spack gc -y
+
+# Strip all the binaries
+RUN find -L /opt/view/* -type f -exec readlink -f '{}' \; | \
+    xargs file -i | \
+    grep 'charset=binary' | \
+    grep 'x-executable\|x-archive\|x-sharedlib' | \
+    awk -F: '{print $1}' | xargs strip -s
+
+# Modifications to the environment that are necessary to run
+RUN cd /opt/spack-environment && \
+    spack env activate --sh -d . >> /etc/profile.d/z10_spack_environment.sh
+
+COPY . /neomem
+
+RUN cd /neomem && \
+    . /etc/profile && \
+    cmake . -DWITHOUT_CUDA=1 && make
+
+ENTRYPOINT ["/bin/bash", "--rcfile", "/etc/profile", "-l"]
