@@ -28,6 +28,7 @@ RUN mkdir /opt/spack-environment \
 &&   echo "  - py-pip" \
 &&   echo "  - py-pybind11" \
 &&   echo "  - py-torch@$PYTORCH_VERSION ~gloo" \
+&&   echo "  - py-pytest" \
 &&   echo "  - cmake" \
 &&   echo "  - pkgconfig" \
 &&   echo "  concretizer:" \
@@ -44,14 +45,22 @@ RUN find -L /opt/view/* -type f -exec readlink -f '{}' \; | \
     grep 'x-executable\|x-archive\|x-sharedlib' | \
     awk -F: '{print $1}' | xargs strip -s
 
+RUN echo pytest -v --capture=no --continue-on-collection-errors > /pytest.sh
+RUN chmod a+x /pytest.sh
+
 # Modifications to the environment that are necessary to run
 RUN cd /opt/spack-environment && \
     spack env activate --sh -d . >> /etc/profile.d/z10_spack_environment.sh
 
+# Compile Neomem
 COPY . /neomem
 
-RUN cd /neomem && \
-    . /etc/profile && \
+RUN . /etc/profile && \
+    cd /neomem && \
     cmake . -DWITHOUT_CUDA=1 && make
 
-ENTRYPOINT ["/bin/bash", "--rcfile", "/etc/profile", "-l"]
+RUN . /etc/profile && \
+    cp /neomem/src/neomem*.so $PYTHONPATH && \
+    cp /neomem/src/neomem_example /opt/view/bin
+
+ENTRYPOINT ["/bin/bash", "--rcfile", "/etc/profile", "-l", "-c"]
