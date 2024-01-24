@@ -349,6 +349,13 @@ void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch) {
         batch.samples.data_ptr(),
         batch.get_size() * num_bytes_per_representative
     );
+    for (size_t r = 0; r < num_samples_per_representative - 1; r++) {
+        std::memcpy(
+            (char *) batch.aug_ground_truth[r].data_ptr(),
+            batch.ground_truth[r].data_ptr(),
+            batch.get_size() * num_bytes_per_representative
+        );
+    }
     std::memcpy(
         (char *) batch.aug_targets.data_ptr(),
         batch.targets.data_ptr(),
@@ -537,11 +544,13 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_i
             ));
         }
 #else
-        std::memcpy(
-            (char *) dest_samples->data_ptr() + batch.m_augmentation_mark * nbytes + cumulated_offset,
-            (char *) client_mem.buffer->data_ptr() + pair.first,
-            pair.second
-        );
+        for (size_t r = 0; r < num_samples_per_representative; r++) {
+            std::memcpy(
+                (char *) client_dest_tensors[r]->data_ptr() + batch.m_augmentation_mark * num_bytes_per_representative + cumulated_offset,
+                (char *) client_mems[r].buffer->data_ptr() + pair.first,
+                pair.second
+            );
+        }
 #endif
         cumulated_offset += pair.second;
     }
@@ -609,9 +618,9 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
             index = dice_buffer(rand_gen);
         }
 
-#ifndef WITHOUT_CUDA
         size_t j = N * label + index;
         ASSERT(j < K * N);
+#ifndef WITHOUT_CUDA
         CHECK_CUDA_ERROR(cudaMemcpyAsync(
             (char *) rehearsal_tensor->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j,
             (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
@@ -629,14 +638,20 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
             ));
         }
 #else
-        /*
+        std::memcpy(
+            (char *) rehearsal_tensor->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j,
+            (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
+            num_bytes_per_representative
+        );
         for (size_t r = 0; r < num_samples_per_representative - 1; r++) {
-            size_t j = N * label + index + r + 1;
-            ASSERT(j < K * N * num_samples_per_representative);
-            rehearsal_tensor->index_put_({static_cast<int>(j)}, batch.samples.index({static_cast<int>(i)}));
+            std::memcpy(
+                (char *) rehearsal_tensor->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j + num_bytes_per_representative * (r + 1),
+                (char *) batch.ground_truth[r].data_ptr() + num_bytes_per_representative * i,
+                num_bytes_per_representative
+            );
         }
-        */
 #endif
+
         if (index >= rehearsal_metadata[label].first) {
             m_rehearsal_size++;
             rehearsal_metadata[label].first++;
@@ -768,7 +783,10 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
                 ));
             }
 #else
-            server_mem.buffer->index_put_({o}, rehearsal_tensor->index({reprs_indices[i]}));
+            for (size_t r = 0; r < num_samples_per_representative; r++) {
+                const int index = num_samples_per_representative * reprs_indices[i] + r;
+                server_mems[r].buffer->index_put_({o}, rehearsal_tensor->index({index}));
+            }
 #endif
             o++;
         }
