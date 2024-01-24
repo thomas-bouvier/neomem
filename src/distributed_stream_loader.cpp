@@ -173,43 +173,41 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer() {
             throw std::invalid_argument("NoBuffer policy is selected, so we should write in a variable declared on the Python side, which you didn't provide (or use CPUBuffer or CUDABuffer)");
         if (!engine_loader.is_cuda_rdma_enabled() && alloc_aug_samples.is_cuda())
             throw std::invalid_argument("NoBuffer policy is selected, but cuda+verbs is not supported");
-
-        //client_mems[0].buffer = &alloc_aug_samples;
-    } else {
-        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-        if (buffer_strategy == CUDABuffer) {
-            if (!engine_loader.is_cuda_rdma_enabled())
-                throw std::invalid_argument("CUDABuffer policy is selected, but cuda+verbs is not supported");
-
-            options = options.device(torch::kCUDA);
-        } else {
-#ifndef WITHOUT_CUDA
-            options = options.pinned_memory(true);
-#endif
-        }
-
-        // Initializing client bulks    
-        auto shape = representative_shape;
-        shape.insert(shape.begin(), R);
-        for (size_t r = 0; r < num_samples_per_representative; r++) {
-            exposed_memory_t client_mem;
-            client_mem.buffer = new torch::Tensor(torch::ones(shape, options));
-
-            struct hg_bulk_attr attr;
-            memset(&attr, 0, sizeof(attr));
-            if (client_mem.buffer->is_cuda())
-                attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_CUDA;
-            else
-                attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
-
-            client_mem.segments.emplace_back(client_mem.buffer->data_ptr(), R * num_bytes_per_representative);
-            client_mem.bulk = get_engine().expose(client_mem.segments, tl::bulk_mode::write_only, attr);
-
-            client_mems.emplace_back(std::move(client_mem));
-            DBG("[" << engine_loader.get_id() << "] Client mem " << r << " initialized!");
-        }
-        DBG("[" << engine_loader.get_id() << "] Client mems initialized!");
     }
+
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+    if (buffer_strategy == CUDABuffer) {
+        if (!engine_loader.is_cuda_rdma_enabled())
+            throw std::invalid_argument("CUDABuffer policy is selected, but cuda+verbs is not supported");
+
+        options = options.device(torch::kCUDA);
+    } else {
+#ifndef WITHOUT_CUDA
+        options = options.pinned_memory(true);
+#endif
+    }
+
+    // Initializing client bulks    
+    auto shape = representative_shape;
+    shape.insert(shape.begin(), R);
+    for (size_t r = 0; r < num_samples_per_representative; r++) {
+        exposed_memory_t client_mem;
+        client_mem.buffer = new torch::Tensor(torch::ones(shape, options));
+
+        struct hg_bulk_attr attr;
+        memset(&attr, 0, sizeof(attr));
+        if (client_mem.buffer->is_cuda())
+            attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_CUDA;
+        else
+            attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
+
+        client_mem.segments.emplace_back(client_mem.buffer->data_ptr(), R * num_bytes_per_representative);
+        client_mem.bulk = get_engine().expose(client_mem.segments, tl::bulk_mode::write_only, attr);
+
+        client_mems.emplace_back(std::move(client_mem));
+        DBG("[" << engine_loader.get_id() << "] Client mem " << r << " initialized!");
+    }
+    DBG("[" << engine_loader.get_id() << "] Client mems initialized!");
 }
 
 /**
