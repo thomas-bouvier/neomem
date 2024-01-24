@@ -57,6 +57,7 @@ COPY . /neomem
 
 RUN . /etc/profile && \
     cd /neomem && \
+    rm -f CMakeCache.txt && \
     cmake . -DWITHOUT_CUDA=1 && make
 
 RUN . /etc/profile && \
