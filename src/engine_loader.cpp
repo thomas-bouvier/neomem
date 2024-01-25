@@ -1,4 +1,5 @@
 #include "engine_loader.hpp"
+#include "debug.hpp"
 
 engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_id, bool _cuda_rdma)
     : server_address(address), server_id(provider_id), cuda_rdma(_cuda_rdma) {
@@ -10,9 +11,14 @@ engine_loader_t::engine_loader_t(const std::string &address, uint16_t provider_i
 
     // Use a progress thread to avoid collisions (hangs) with MPI collectives
     server_engine = tl::engine(address, THALLIUM_SERVER_MODE, true, POOL_SIZE, &hii);
+    server_engine.enable_remote_shutdown();
 
     std::cout << "Server running at address " << server_engine.self()
                 << " with provider id " << provider_id << ", device registration: " << cuda_rdma << std::endl;
+}
+
+void engine_loader_t::wait_for_finalize() {
+    server_engine.wait_for_finalize();
 }
 
 const tl::engine& engine_loader_t::get_engine() const {

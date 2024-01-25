@@ -20,6 +20,8 @@ public:
     const tl::engine& get_engine() const;
     uint16_t get_id() const;
     bool is_cuda_rdma_enabled() const;
+
+    void wait_for_finalize();
 };
 
 #endif

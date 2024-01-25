@@ -55,14 +55,13 @@ if __name__ == "__main__":
     values = np.random.rand(5000, 3, 224, 224)
     labels = np.random.randint(0, K, 5000)
     dataset = MyDataset(values, labels)
-    loader = DataLoader(dataset=dataset, batch_size=B,
-                        shuffle=True, num_workers=4, pin_memory=True)
+    loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
     ##### `standard` buffer
     print("========================standard")
 
     engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
-    dsl = neomem.DistributedStreamLoader(
+    dsl = neomem.DistributedStreamLoader.create(
         engine,
         neomem.Classification, K, N, R, C,
         ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
@@ -85,7 +84,7 @@ if __name__ == "__main__":
     print("========================flyweight")
 
     engine2 = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
-    dsl2 = neomem.DistributedStreamLoader(
+    dsl2 = neomem.DistributedStreamLoader.create(
         engine2,
         neomem.Classification, K, N, R, C,
         ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True

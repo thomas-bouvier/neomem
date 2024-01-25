@@ -9,7 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 
 class MyDataset(Dataset):
     def __init__(self, values, labels):
-        super(MyDataset, self).__init__()
+        super().__init__()
         self.values = values
         self.labels = labels
 
@@ -69,14 +69,14 @@ if __name__ == "__main__":
                             shuffle=True, num_workers=4, pin_memory=True)
 
     engine1 = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
-    dsl1 = neomem.DistributedStreamLoader(
+    dsl1 = neomem.DistributedStreamLoader.create(
         engine1,
         neomem.Classification, K, N, R, C,
         ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
     )
 
     engine2 = neomem.EngineLoader("tcp://127.0.0.1:1235", 1, False)
-    dsl2 = neomem.DistributedStreamLoader(
+    dsl2 = neomem.DistributedStreamLoader.create(
         engine2,
         neomem.Classification, K, N, R, C,
         ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
@@ -110,7 +110,7 @@ if __name__ == "__main__":
     loader = DataLoader(dataset=dataset, batch_size=B,
                         shuffle=True, num_workers=4, pin_memory=True)
 
-    dsl_recon = rehearsal.DistributedStreamLoader(
+    dsl_recon = rehearsal.DistributedStreamLoader.create(
         rehearsal.Reconstruction, 1, N_recon, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", 2, [1, 128, 128], False)
 
     for epoch in range(4):

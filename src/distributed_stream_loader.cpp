@@ -56,7 +56,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
     unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
     BufferStrategy _buffer_strategy, bool discover_endpoints, bool _verbose)
         : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id()),
-        engine_loader(_engine_loader),
+        m_provider_id(_engine_loader.get_id()),
         task_type(_task_type), K(_K), N(_N), R(_R), C(_C), rand_gen(seed),
         num_samples_per_representative(_num_samples_per_representative),
         representative_shape(_representative_shape), buffer_strategy(_buffer_strategy), verbose(_verbose) {
@@ -67,11 +67,20 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
     // Register the remote procedure
     m_client_procedure = get_engine().define("get_samples");
 
+    // Setup a finalization callback for this provider, in case it is
+    // still alive when the engine is finalized.
+    get_engine().push_finalize_callback(this, [p=this]() {
+        if (p->verbose)
+            DBG("[" << p->m_provider_id << "] Shutting down current provider...");
+        delete p;
+    });
+
     // MPI has maybe been initialized by horovodrun
     int mpi_initialized = true;
     MPI_Initialized(&mpi_initialized);
     if (!mpi_initialized) {
-        MPI_Init(NULL, NULL);
+        MPI_Init(NULL, NULL); 
+        //throw std::runtime_error("MPI should be initialized outside of Neomem.");
     } else {
         mpi_was_initialized = true;
     }
@@ -93,7 +102,8 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
     cudaGetDeviceCount(&num_devices);
     cudaSetDevice(m_local_rank % num_devices);
 
-    DBG("[" << engine_loader.get_id() << "] Setting CUDA device " << m_local_rank % num_devices);
+    if (verbose)
+        DBG("[" << engine_loader.get_id() << "] Setting CUDA device " << m_local_rank % num_devices);
 
     CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[0])); // streamNonBlockingSync causes a sync issue
     // To reproduce, use only async copy functions, except in copy_last_batch.
@@ -105,6 +115,15 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
     init_receiving_rdma_buffer();
 }
 
+/* static */ distributed_stream_loader_t* distributed_stream_loader_t::create(const engine_loader_t& engine_loader, Task task_type,
+    unsigned int K, unsigned int N, unsigned int R, unsigned int C, int64_t seed,
+    unsigned int num_samples_per_representative, std::vector<long> representative_shape,
+    BufferStrategy buffer_strategy,
+    bool discover_endpoints, bool verbose) {
+    return new distributed_stream_loader_t(engine_loader, task_type, K, N, R, C, seed,
+        num_samples_per_representative, representative_shape, buffer_strategy, discover_endpoints, verbose);
+}
+
 /**
  * Contact all other nodes to get their endpoints. The returned dictionary maps
  * endpoints (keys) to provider ids (values).
@@ -112,7 +131,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
 std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() {
     nvtx3::scoped_range r{"gather_endpoints"};
 
-    std::map<std::string, int> endpoints = {{get_engine().self(), engine_loader.get_id()}};
+    std::map<std::string, int> endpoints = {{get_engine().self(), m_provider_id}};
     auto all_endpoints = gather_dictionary(endpoints, m_num_workers);
 
     return all_endpoints;
@@ -133,9 +152,7 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
     nvtx3::scoped_range r{"init_rehearsal_buffer"};
 
     auto size = K * N * num_samples_per_representative;
-    DBG("[" << engine_loader.get_id() << "] size " << size);
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(pin_buffers);
-    DBG("[" << engine_loader.get_id() << "] representative shape " << representative_shape);
 
     auto rehearsal_shape = representative_shape;
     rehearsal_shape.insert(rehearsal_shape.begin(), size);
@@ -143,7 +160,9 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
     ASSERT(rehearsal_tensor->is_contiguous());
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 1.0));
     rehearsal_counts.insert(rehearsal_counts.begin(), K, 0);
-    DBG("[" << engine_loader.get_id() << "] Distributed buffer memory allocated!");
+
+    if (verbose)
+        DBG("[" << m_provider_id << "] Distributed buffer memory allocated!");
 
     // Initializing server bulks
     auto shape = representative_shape;
@@ -155,9 +174,13 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
         server_mem.bulk = get_engine().expose(server_mem.segments, tl::bulk_mode::read_only);
 
         server_mems.emplace_back(std::move(server_mem));
-        DBG("[" << engine_loader.get_id() << "] Server mem " << r << " initialized!");
+
+        if (verbose)
+            DBG("[" << m_provider_id << "] Server mem " << r << " initialized!");
     }
-    DBG("[" << engine_loader.get_id() << "] Server mems initialized!");
+
+    if (verbose)
+        DBG("[" << m_provider_id << "] Server mems initialized!");
 }
 
 /**
@@ -171,14 +194,14 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer() {
     if (buffer_strategy == NoBuffer) {
         if (!m_use_allocated_variables)
             throw std::invalid_argument("NoBuffer policy is selected, so we should write in a variable declared on the Python side, which you didn't provide (or use CPUBuffer or CUDABuffer)");
-        if (!engine_loader.is_cuda_rdma_enabled() && alloc_aug_samples.is_cuda())
-            throw std::invalid_argument("NoBuffer policy is selected, but cuda+verbs is not supported");
+        //if (!engine_loader.is_cuda_rdma_enabled() && alloc_aug_samples.is_cuda())
+        //    throw std::invalid_argument("NoBuffer policy is selected, but cuda+verbs is not supported");
     }
 
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
     if (buffer_strategy == CUDABuffer) {
-        if (!engine_loader.is_cuda_rdma_enabled())
-            throw std::invalid_argument("CUDABuffer policy is selected, but cuda+verbs is not supported");
+        //if (!engine_loader.is_cuda_rdma_enabled())
+        //    throw std::invalid_argument("CUDABuffer policy is selected, but cuda+verbs is not supported");
 
         options = options.device(torch::kCUDA);
     } else {
@@ -205,9 +228,13 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer() {
         client_mem.bulk = get_engine().expose(client_mem.segments, tl::bulk_mode::write_only, attr);
 
         client_mems.emplace_back(std::move(client_mem));
-        DBG("[" << engine_loader.get_id() << "] Client mem " << r << " initialized!");
+
+        if (verbose)
+            DBG("[" << m_provider_id << "] Client mem " << r << " initialized!");
     }
-    DBG("[" << engine_loader.get_id() << "] Client mems initialized!");
+
+    if (verbose)
+        DBG("[" << m_provider_id << "] Client mems initialized!");
 }
 
 /**
@@ -242,7 +269,7 @@ void distributed_stream_loader_t::async_process() {
         lock.unlock();
 
         if (verbose)
-            DBG("[" << engine_loader.get_id() << "] Consuming a batch!");
+            DBG("[" << m_provider_id << "] Consuming a batch!");
 
         nvtx3::mark("new iteration in async_process");
 
@@ -300,6 +327,11 @@ void distributed_stream_loader_t::async_process() {
         lock.unlock();
         request_cond.notify_one();
     }
+
+    for (auto& provider_handle : provider_handles) {
+        if (provider_handle.provider_id() == m_provider_id)
+            get_engine().shutdown_remote_engine(provider_handle);
+    }
 }
 
 /**
@@ -309,7 +341,7 @@ void distributed_stream_loader_t::async_process() {
 void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch) {
     nvtx3::scoped_range r{"copy_last_batch"};
     if (verbose)
-        DBG("[" << engine_loader.get_id() << "] Copying last batch!");
+        DBG("[" << m_provider_id << "] Copying last batch!");
 
     // Copy incoming samples into the next augmented minibatch
 #ifndef WITHOUT_CUDA
@@ -402,7 +434,7 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch) {
  */
 std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses) {
     if (verbose)
-        DBG("[" << engine_loader.get_id() << "] Dispatching rpcs");
+        DBG("[" << m_provider_id << "] Dispatching rpcs");
 
     std::vector<tl::bulk> client_bulks;
     for (size_t i = 0; i < client_mems.size(); i++)
@@ -432,7 +464,7 @@ std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_res
  */
 void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& responses, queue_item_t &batch) {
     if (verbose)
-        DBG("[" << engine_loader.get_id() << "] Resolving rpcs...");
+        DBG("[" << m_provider_id << "] Resolving rpcs...");
 
     // Sequence of integers representing sections that have been written,
     // first element is the memory offset, second is the number of bytes
@@ -737,7 +769,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
     }
 
     if (verbose && c > 0) {
-        std::cout << "[" << engine_loader.get_id() << "] Sending " << c << "/" << indices.size()  << " representatives from "
+        std::cout << "[" << m_provider_id << "] Sending " << c << "/" << indices.size()  << " representatives from "
             << samples.size() << " different classes to remote node (endpoint: "
             << req.get_endpoint() << ", writing at offset " << client_bulks_offset << " for all " << client_bulks.size() << " client bulks)" << std::endl;
     }
@@ -965,15 +997,23 @@ std::vector<float> distributed_stream_loader_t::get_metrics(size_t i_batch) {
     return m_metrics[i_batch].get_durations();
 }
 
-distributed_stream_loader_t::~distributed_stream_loader_t() noexcept {
+void distributed_stream_loader_t::finalize() {
     std::unique_lock<tl::mutex> lock(request_mutex);
     request_queue.push_back(queue_item_t());
     lock.unlock();
     request_cond.notify_one();
 
-    if (!mpi_was_initialized) {
-        MPI_Finalize();
-    }
+    if (verbose)
+        DBG("[" << m_provider_id << "] Finalize signal sent...");
+}
+
+distributed_stream_loader_t::~distributed_stream_loader_t() noexcept {
+    m_server_procedure.deregister();
+    // Pop the finalize callback. If this destructor was called
+    // from the finalization callback, there is nothing to pop
+    get_engine().pop_finalize_callback(this);
+
+    es->join();
 
 #ifndef WITHOUT_CUDA
     for (int i = 0; i < 3; ++i) {
@@ -981,8 +1021,7 @@ distributed_stream_loader_t::~distributed_stream_loader_t() noexcept {
         cudaStreamDestroy(m_streams[i]);
     }
 #endif
-
-    get_engine().wait_for_finalize();
+    delete rehearsal_tensor;
 }
 
 namespace cereal {

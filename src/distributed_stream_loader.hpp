@@ -65,13 +65,22 @@ struct exposed_memory_t {
 
 
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
-public:
+private:
     distributed_stream_loader_t(const engine_loader_t& _engine_loader, Task _task_type,
         unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
         unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
         BufferStrategy _buffer_strategy,
         bool discover_endpoints = false, bool _verbose = false);
+    
+public:
+    // This factory method and the private constructor prevent users
+    // from putting an instance of distributed_stream_loader_t on the stack.
+    static distributed_stream_loader_t* create(const engine_loader_t& engine_loader, Task task_type,
+    unsigned int K, unsigned int N, unsigned int R, unsigned int C, int64_t seed,
+    unsigned int num_samples_per_representative, std::vector<long> representative_shape,
+    BufferStrategy buffer_strategy, bool discover_endpoints, bool verbose);
     ~distributed_stream_loader_t() noexcept;
+    void finalize();
 
     void register_endpoints(const std::map<std::string, int>& endpoints);
     void start();
@@ -92,7 +101,7 @@ public:
     std::vector<float> get_metrics(size_t i_batch);
 
 protected:
-    engine_loader_t engine_loader;
+    uint16_t m_provider_id;
 
     void init_rehearsal_buffers(bool pin_buffers);
     void init_receiving_rdma_buffer();

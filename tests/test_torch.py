@@ -3,28 +3,13 @@ import neomem
 import os
 import random
 import unittest
-import warnings
 
+import mpi4py
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader
-
-
-class MyDataset(Dataset):
-    def __init__(self, values, labels):
-        super(MyDataset, self).__init__()
-        self.values = values
-        self.labels = labels
-
-    def __len__(self):
-        return len(self.values)
-
-    def __getitem__(self, index):
-        return self.values[index], self.labels[index]
 
 
 class CustomDataset(Dataset):
@@ -67,6 +52,8 @@ def skip_or_fail_gpu_test(test, message):
         test.skipTest(message)
 
 class TorchTests(unittest.TestCase):
+
+    verbose = False
 
     def setup(self):
         torch.manual_seed(0)
@@ -117,39 +104,43 @@ class TorchTests(unittest.TestCase):
     """
 
     def test_neomem_standard_buffer(self):
-        values = np.random.rand(5000, 3, 224, 224)
-        labels = np.random.randint(0, K, 5000)
-        dataset = MyDataset(values, labels)
+        """Test that a single rehearsal buffer (in standard mode)
+        returns the correct representatives and doesn't cause any crash.
+        """
+        dataset = CustomDataset(B)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
-        dsl = neomem.DistributedStreamLoader(
+        dsl = neomem.DistributedStreamLoader.create(
             engine,
             neomem.Classification, K, N, R, C,
-            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
+            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
         dsl.enable_augmentation(True)
         dsl.start()
 
-        for _ in range(4):
+        for _ in range(2):
             for inputs, target in loader:
                 dsl.accumulate(inputs, target, aug_samples, aug_labels, aug_weights)
-                dsl.wait()
+                size = dsl.wait()
+
+                for j in range(B, size):
+                    assert(torch.all(aug_samples[j] == aug_labels[j]))
+
+        dsl.finalize()
+        engine.wait_for_finalize()
 
     """
     def test_neomem_flyweight_buffer(self):
-        values = np.random.rand(5000, 3, 224, 224)
-        labels = np.random.randint(0, K, 5000)
-        dataset = MyDataset(values, labels)
-        loader = DataLoader(dataset=dataset, batch_size=B,
-                            shuffle=True, num_workers=4, pin_memory=True)
+        dataset = CustomDataset(B)
+        loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
-        dsl = neomem.DistributedStreamLoader(
+        dsl = neomem.DistributedStreamLoader.create(
             engine,
             neomem.Classification, K, N, R, C,
-            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
+            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
         )
         dsl = engine.get_loader()
         dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
@@ -157,31 +148,39 @@ class TorchTests(unittest.TestCase):
         dsl.use_these_allocated_variables(aug_samples2, aug_labels2, aug_weights2)
         dsl.start()
 
-        for _ in range(4):
+        for _ in range(2):
             for inputs, target in loader:
                 dsl.accumulate(inputs, target)
-                dsl.wait()
+                size = dsl.wait()
+
+                for j in range(B, size):
+                    assert(aug_labels[j] == aug_samples[j, 0, 0, 0])
+
+        dsl.finalize()
+        engine.wait_for_finalize()
+    """
 
     def test_neomem_engine_shutdown(self):
-        engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
-        dsl = neomem.DistributedStreamLoader(
-            engine,
-            neomem.Classification, K, N, R, C,
-            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
-        )
-        dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
-        dsl.enable_augmentation(True)
-        dsl.start()
+        """Test that a single rehearsal buffer can be properly shut down,
+        and that a second can be started without causing any crash.
+        """
+        dataset = CustomDataset(B)
+        loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
-        del engine
+        for _ in range(2):
+            engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
+            dsl = neomem.DistributedStreamLoader.create(
+                engine,
+                neomem.Classification, K, N, R, C,
+                ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
+            )
+            dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
+            dsl.enable_augmentation(True)
+            dsl.start()
 
-        engine2 = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
-        dsl2 = neomem.DistributedStreamLoader(
-            engine2,
-            neomem.Classification, K, N, R, C,
-            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
-        )
-        dsl2.register_endpoints({'tcp://127.0.0.1:1234': 0})
-        dsl2.enable_augmentation(True)
-        dsl2.start()
-    """
+            for inputs, target in loader:
+                dsl.accumulate(inputs, target, aug_samples, aug_labels, aug_weights)
+                dsl.wait()
+
+            dsl.finalize()
+            engine.wait_for_finalize()

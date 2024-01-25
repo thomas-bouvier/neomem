@@ -79,12 +79,12 @@ int main(int argc, char** argv) {
     }
 
     engine_loader_t engine(server_address, server_id);
-    distributed_stream_loader_t dsl(engine, Classification, K, N, R, C, seed, 1, {3, 224, 224}, CPUBuffer, discover_endpoints, true);
+    distributed_stream_loader_t* dsl = distributed_stream_loader_t::create(engine, Classification, K, N, R, C, seed, 1, {3, 224, 224}, CPUBuffer, discover_endpoints, true);
     if (!mpi) {
-        dsl.register_endpoints(endpoints);
+        dsl->register_endpoints(endpoints);
     }
-    dsl.enable_augmentation(true);
-    dsl.start();
+    dsl->enable_augmentation(true);
+    dsl->start();
 
     MPI_Barrier(MPI_COMM_WORLD);
 
@@ -109,11 +109,11 @@ int main(int argc, char** argv) {
         return std::make_tuple<>(samples, labels);
     };
 
-    for (int i = 0; i < 1000; i++) {
+    for (int i = 0; i < 100; i++) {
         std::cout << "Round " << i << std::endl;
         auto batch = random_batch(i, device_type);
-        dsl.accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
-        size_t size = dsl.wait();
+        dsl->accumulate(std::get<0>(batch), std::get<1>(batch), aug_samples, aug_labels, aug_weights);
+        size_t size = dsl->wait();
         std::cout << "Received " << size - N << std::endl;
 
         MPI_Barrier(MPI_COMM_WORLD);
@@ -129,9 +129,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (mpi) {
-        MPI_Finalize();
-    }
+    dsl->finalize();
 
     return 0;
 }
