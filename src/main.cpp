@@ -130,6 +130,7 @@ int main(int argc, char** argv) {
     }
 
     dsl->finalize();
+    engine.wait_for_finalize();
 
     return 0;
 }

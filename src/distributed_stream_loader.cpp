@@ -129,7 +129,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
  * endpoints (keys) to provider ids (values).
  */
 std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() {
-    nvtx3::scoped_range r{"gather_endpoints"};
+    nvtx3::scoped_range nvtx{"gather_endpoints"};
 
     std::map<std::string, int> endpoints = {{get_engine().self(), m_provider_id}};
     auto all_endpoints = gather_dictionary(endpoints, m_num_workers);
@@ -137,8 +137,11 @@ std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() {
     return all_endpoints;
 }
 
+/**
+ *
+ */
 void distributed_stream_loader_t::register_endpoints(const std::map<std::string, int>& endpoints) {
-    nvtx3::scoped_range r{"register_endpoints"};
+    nvtx3::scoped_range nvtx{"register_endpoints"};
 
     for (auto endpoint : endpoints) {
         std::cout << "Looking up " << endpoint.first << ", " << endpoint.second << std::endl;
@@ -148,8 +151,11 @@ void distributed_stream_loader_t::register_endpoints(const std::map<std::string,
     ASSERT(static_cast<int>(provider_handles.size()) == m_num_workers);
 }
 
+/**
+ * Initialize
+ */
 void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
-    nvtx3::scoped_range r{"init_rehearsal_buffer"};
+    nvtx3::scoped_range nvtx{"init_rehearsal_buffer"};
 
     auto size = K * N * num_samples_per_representative;
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(pin_buffers);
@@ -189,7 +195,7 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
  * - the buffer strategy, NoBuffer, CPUBuffer or CUDABuffer
  */
 void distributed_stream_loader_t::init_receiving_rdma_buffer() {
-    nvtx3::scoped_range r{"init_receiving_rdma_buffer"};
+    nvtx3::scoped_range nvtx{"init_receiving_rdma_buffer"};
 
     if (buffer_strategy == NoBuffer) {
         if (!m_use_allocated_variables)
@@ -301,7 +307,7 @@ void distributed_stream_loader_t::async_process() {
 
 #ifndef WITHOUT_CUDA
         {
-            nvtx3::scoped_range r{"backend_overhead"};
+            nvtx3::scoped_range nvtx{"backend_overhead"};
             // Wait for all async CUDA copies
             cudaStreamSynchronize(m_streams[0]);
         }
@@ -339,7 +345,7 @@ void distributed_stream_loader_t::async_process() {
  * augmented minibatch.
  */
 void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch) {
-    nvtx3::scoped_range r{"copy_last_batch"};
+    nvtx3::scoped_range nvtx{"copy_last_batch"};
     if (verbose)
         DBG("[" << m_provider_id << "] Copying last batch!");
 
@@ -421,7 +427,7 @@ void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch) {
  * minibatch to augment `dest_samples`.
  */
 void distributed_stream_loader_t::augment_batch(queue_item_t &batch) {
-    nvtx3::scoped_range r{"augment_batch"};
+    nvtx3::scoped_range nvtx{"augment_batch"};
 
     // Dispatch rpcs to other processes
     std::vector<tl::async_response> responses;
@@ -559,7 +565,7 @@ std::vector<std::pair<int, int>> distributed_stream_loader_t::merge_contiguous_m
  * execution (`alloc_aug_samples`).
  */
 void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections) {
-    nvtx3::scoped_range r{"copy_exposed_buffer_to_aug_batch"};
+    nvtx3::scoped_range nvtx{"copy_exposed_buffer_to_aug_batch"};
 
     auto cumulated_offset = 0;
     for (const auto& pair : sections) {
@@ -597,7 +603,7 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_i
  * Local indices might be used to access the provider_handles vector.
  */
 std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int R) {
-    nvtx3::scoped_range r{"pick_random_indices"};
+    nvtx3::scoped_range nvtx{"pick_random_indices"};
 
     const unsigned int max_global_index = provider_handles.size() * K * N;
     std::uniform_int_distribution<unsigned int> dice(0, max_global_index - 1);
@@ -628,7 +634,7 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
  * buffer.
  */
 void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
-    nvtx3::scoped_range r{"populate_rehearsal_buffer"};
+    nvtx3::scoped_range nvtx{"populate_rehearsal_buffer"};
 
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
@@ -704,7 +710,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
  * small weights. Keeping this function as future work.
  */
 void distributed_stream_loader_t::update_representative_weights(const queue_item_t& batch, int num_representatives) {
-    nvtx3::scoped_range r{"update_representative_weights"};
+    nvtx3::scoped_range nvtx{"update_representative_weights"};
 
     float weight = (float) batch.get_size() / (float) (num_representatives * m_rehearsal_size);
     for (size_t i = 0; i < rehearsal_metadata.size(); i++) {
@@ -719,7 +725,7 @@ void distributed_stream_loader_t::update_representative_weights(const queue_item
  * j is the offset where this server procedure should write into the client buffer.
  */
 void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int client_bulks_offset) {
-    nvtx3::scoped_range r{"get_remote_samples"};
+    nvtx3::scoped_range nvtx{"get_remote_samples"};
 
     int c = 0, o = 0;
     std::vector<std::tuple<size_t, float, std::vector<int>>> samples;
@@ -851,7 +857,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
  * batch.aug_size will have a min value of 0.
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets) {
-    nvtx3::scoped_range r{"accumulate"};
+    nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
@@ -875,7 +881,7 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
  */
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
                  const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
-    nvtx3::scoped_range r{"accumulate"};
+    nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
@@ -889,7 +895,7 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
 }
 
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets, std::vector<torch::Tensor> &ground_truth) {
-    nvtx3::scoped_range r{"accumulate"};
+    nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
@@ -906,7 +912,7 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
 
 void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets, std::vector<torch::Tensor> &ground_truth,
                  const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, std::vector<torch::Tensor> &aug_ground_truth) {
-    nvtx3::scoped_range r{"accumulate"};
+    nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
@@ -969,7 +975,7 @@ void distributed_stream_loader_t::use_these_allocated_variables(const torch::Ten
  * blocking the Python thread.
  */
 int distributed_stream_loader_t::wait() {
-    nvtx3::scoped_range r{"wait"};
+    nvtx3::scoped_range nvtx{"wait"};
 
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (response_queue.empty())

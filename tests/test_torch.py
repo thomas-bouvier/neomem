@@ -1,10 +1,10 @@
 import ctypes
-import neomem
 import os
 import random
 import unittest
 
 import mpi4py
+import neomem
 import numpy as np
 import pytest
 import torch
@@ -35,18 +35,9 @@ R = 20
 # batch_size
 B = 128
 
-aug_samples = torch.zeros(B + R, 3, 224, 224)
-aug_labels = torch.randint(high=K, size=(B + R,))
-aug_weights = torch.zeros(B + R)
-
-aug_samples2 = torch.zeros(B + R, 3, 224, 224)
-aug_labels2 = torch.randint(high=K, size=(B + R,))
-aug_weights2 = torch.zeros(B + R)
-
-
 def skip_or_fail_gpu_test(test, message):
     """Fails the test if GPUs are required, otherwise skips."""
-    if int(os.environ.get('HOROVOD_TEST_GPU', 0)):
+    if int(os.environ.get('NEOMEM_TEST_GPU', 0)):
         test.fail(message)
     else:
         test.skipTest(message)
@@ -64,8 +55,17 @@ class TorchTests(unittest.TestCase):
         if not torch.cuda.is_available():
             skip_or_fail_gpu_test(self, "No GPUs available")
 
-    """
     def test_neomem_multiple_clients(self):
+        self.skipTest("Multiple providers")
+
+        aug_samples = torch.zeros(B + R, 3, 224, 224)
+        aug_labels = torch.randint(high=K, size=(B + R,))
+        aug_weights = torch.zeros(B + R)
+
+        aug_samples2 = torch.zeros(B + R, 3, 224, 224)
+        aug_labels2 = torch.randint(high=K, size=(B + R,))
+        aug_weights2 = torch.zeros(B + R)
+
         dataset = CustomDataset(B)
         loader = DataLoader(dataset=dataset, batch_size=B,
                                 shuffle=True, num_workers=4, pin_memory=True)
@@ -97,16 +97,25 @@ class TorchTests(unittest.TestCase):
                 dsl1.accumulate(inputs, target, aug_samples, aug_labels, aug_weights)
                 dsl2.accumulate(inputs, target, aug_samples2, aug_labels2, aug_weights2)
                 size1 = dsl1.wait()
-                size2 = dsl2.wait()
+                dsl2.wait()
 
                 for j in range(B, size1):
-                    assert(aug_labels[j] == aug_samples[j, 0, 0, 0])
-    """
+                    assert torch.all(aug_samples[j] == aug_labels[j])
 
     def test_neomem_standard_buffer(self):
         """Test that a single rehearsal buffer (in standard mode)
         returns the correct representatives and doesn't cause any crash.
+
+        The standard mode prepares a new augmented minibatch of size B + R
+        at every iteration i.e., copies the last batch of size B into the new one
+        and samples additional R representatives via `accumulate`.
+
+        Parameter `size` will have a max value of B + R.
         """
+        aug_samples = torch.zeros(B + R, 3, 224, 224)
+        aug_labels = torch.randint(high=K, size=(B + R,))
+        aug_weights = torch.zeros(B + R)
+
         dataset = CustomDataset(B)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
@@ -126,13 +135,29 @@ class TorchTests(unittest.TestCase):
                 size = dsl.wait()
 
                 for j in range(B, size):
-                    assert(torch.all(aug_samples[j] == aug_labels[j]))
+                    assert torch.all(aug_samples[j] == aug_labels[j])
 
         dsl.finalize()
         engine.wait_for_finalize()
 
-    """
     def test_neomem_flyweight_buffer(self):
+        """Test that a single rehearsal buffer (in flyweight mode)
+        returns the correct representatives and doesn't cause any crash.
+
+        The flyweight mode returns representatives only as a minibatch
+        of size R at every iteration, and this object is allocated only once
+        i.e., not passed from Python at every iteration via `accumulate`.
+
+        Users have to concatenate representatives of size R to an input
+        minibatch of size R manually to obtain an augmented minibatch of
+        size B + R.
+
+        Parameter `size` will have a max value of R.
+        """
+        aug_samples = torch.zeros(R, 3, 224, 224)
+        aug_labels = torch.randint(high=K, size=(R,))
+        aug_weights = torch.zeros(R)
+
         dataset = CustomDataset(B)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
@@ -142,10 +167,9 @@ class TorchTests(unittest.TestCase):
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
         )
-        dsl = engine.get_loader()
         dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
         dsl.enable_augmentation(True)
-        dsl.use_these_allocated_variables(aug_samples2, aug_labels2, aug_weights2)
+        dsl.use_these_allocated_variables(aug_samples, aug_labels, aug_weights)
         dsl.start()
 
         for _ in range(2):
@@ -154,16 +178,19 @@ class TorchTests(unittest.TestCase):
                 size = dsl.wait()
 
                 for j in range(B, size):
-                    assert(aug_labels[j] == aug_samples[j, 0, 0, 0])
+                    assert torch.all(aug_samples[j] == aug_labels[j])
 
         dsl.finalize()
         engine.wait_for_finalize()
-    """
 
     def test_neomem_engine_shutdown(self):
         """Test that a single rehearsal buffer can be properly shut down,
         and that a second can be started without causing any crash.
         """
+        aug_samples = torch.zeros(B + R, 3, 224, 224)
+        aug_labels = torch.randint(high=K, size=(B + R,))
+        aug_weights = torch.zeros(B + R)
+
         dataset = CustomDataset(B)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 

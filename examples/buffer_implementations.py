@@ -78,7 +78,8 @@ if __name__ == "__main__":
             print("before wait")
             dsl.wait()
 
-    del engine
+    dsl.finalize()
+    engine.wait_for_finalize()
 
     ##### `flyweight` buffer
     print("========================flyweight")
@@ -102,3 +103,6 @@ if __name__ == "__main__":
             dsl2.accumulate(inputs, target)
             print("before wait")
             dsl2.wait()
+
+    dsl2.finalize()
+    engine2.wait_for_finalize()

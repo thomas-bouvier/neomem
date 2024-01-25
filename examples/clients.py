@@ -103,6 +103,11 @@ if __name__ == "__main__":
             for j in range(B, size1):
                 assert(aug_labels[j] == aug_samples[j, 0, 0, 0])
 
+    dsl1.finalize()
+    dsl2.finalize()
+    engine1.wait_for_finalize()
+    engine2.wait_for_finalize()
+
     """
     values_recon = np.random.rand(5000, 1, 128, 128)
     target_recon = np.random.rand(5000, 1, 128, 128)
