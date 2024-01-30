@@ -290,8 +290,9 @@ void distributed_stream_loader_t::async_process() {
             client_dest_tensors.push_back(&batch.aug_samples);
             dest_targets = &batch.aug_targets;
             dest_weights = &batch.aug_weights;
-            for (size_t r = 0; r < num_samples_per_representative - 1; r++) {
-                client_dest_tensors.push_back(&batch.aug_ground_truth[r]);
+            if (num_samples_per_representative > 1) {
+                client_dest_tensors.push_back(&batch.aug_amp);
+                client_dest_tensors.push_back(&batch.aug_ph);
             }
 
             batch.m_augmentation_mark = batch.get_size();
@@ -299,8 +300,9 @@ void distributed_stream_loader_t::async_process() {
             copy_last_batch(batch);
         }
 
-        if (m_augmentation_enabled)
+        if (m_augmentation_enabled) {
             augment_batch(batch);
+        }
 
         populate_rehearsal_buffer(batch);
         //update_representative_weights(R, batch_size);
@@ -313,16 +315,6 @@ void distributed_stream_loader_t::async_process() {
         }
 #endif
 
-        /*
-        // If using memcpy in copy_last_batch, this should be moved there
-        for (size_t j = 0; j < batch.get_size(); j++) {
-            ASSERT(torch::equal(batch.aug_samples[j][0][0][0], batch.aug_targets[j].to(torch::kFloat32)));
-        }
-        for (int j = 0; j < batch.aug_size; j++) {
-            ASSERT(torch::equal(batch.aug_samples[j][0][0][0], batch.aug_targets[j].to(torch::kFloat32)));
-        }
-        */
-
         metadata.clear();
         i_batch++;
 
@@ -332,6 +324,12 @@ void distributed_stream_loader_t::async_process() {
         response_queue.emplace_back(batch);
         lock.unlock();
         request_cond.notify_one();
+    }
+
+    if (!m_use_allocated_variables) {
+        client_dest_tensors.clear();
+        dest_targets = nullptr;
+        dest_weights = nullptr;
     }
 
     for (auto& provider_handle : provider_handles) {
@@ -387,10 +385,15 @@ void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch) {
         batch.samples.data_ptr(),
         batch.get_size() * num_bytes_per_representative
     );
-    for (size_t r = 0; r < num_samples_per_representative - 1; r++) {
+    if (num_samples_per_representative > 1) {
         std::memcpy(
-            (char *) batch.aug_ground_truth[r].data_ptr(),
-            batch.ground_truth[r].data_ptr(),
+            (char *) batch.aug_amp.data_ptr(),
+            batch.amp.data_ptr(),
+            batch.get_size() * num_bytes_per_representative
+        );
+        std::memcpy(
+            (char *) batch.aug_ph.data_ptr(),
+            batch.ph.data_ptr(),
             batch.get_size() * num_bytes_per_representative
         );
     }
@@ -643,9 +646,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
     for (size_t i = 0; i < batch.get_size(); i++) {
         //if (dice(rand_gen) >= C)
         //    break;
-        int label = 0;
-        if (task_type == Classification)
-            label = batch.targets[i].item<int>();
+        int label = (K == 1) ? 0 : batch.targets[i].item<int>();
 
         size_t index = -1;
         if (rehearsal_metadata[label].first < N) {
@@ -677,14 +678,19 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         }
 #else
         std::memcpy(
-            (char *) rehearsal_tensor->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j,
+            (char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j),
             (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
             num_bytes_per_representative
         );
-        for (size_t r = 0; r < num_samples_per_representative - 1; r++) {
+        if (num_samples_per_representative > 1) {
             std::memcpy(
-                (char *) rehearsal_tensor->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j + num_bytes_per_representative * (r + 1),
-                (char *) batch.ground_truth[r].data_ptr() + num_bytes_per_representative * i,
+                (char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j + (0 + 1)),
+                (char *) batch.amp.data_ptr() + num_bytes_per_representative * i,
+                num_bytes_per_representative
+            );
+            std::memcpy(
+                (char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j + (1 + 1)),
+                (char *) batch.ph.data_ptr() + num_bytes_per_representative * i,
                 num_bytes_per_representative
             );
         }
@@ -894,24 +900,22 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
     request_cond.notify_one();
 }
 
-void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets, std::vector<torch::Tensor> &ground_truth) {
+void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph) {
     nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
-    if (!m_use_allocated_variables)
-        throw std::runtime_error("You didn't pass variables to augment, so you should call use_these_allocated_variables() before accumulate()");
 
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
         request_cond.wait(lock);
-    request_queue.emplace_back(queue_item_t(samples, targets, ground_truth));
+    request_queue.emplace_back(queue_item_t(samples, targets, amp, ph));
     lock.unlock();
     request_cond.notify_one();
 }
 
-void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets, std::vector<torch::Tensor> &ground_truth,
-                 const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, std::vector<torch::Tensor> &aug_ground_truth) {
+void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph,
+                 const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, const torch::Tensor &aug_amp, const torch::Tensor &aug_ph) {
     nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
@@ -920,7 +924,7 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
         request_cond.wait(lock);
-    request_queue.emplace_back(queue_item_t(samples, targets, ground_truth, aug_samples, aug_targets, aug_weights, aug_ground_truth));
+    request_queue.emplace_back(queue_item_t(samples, targets, amp, ph, aug_samples, aug_targets, aug_weights, aug_amp, aug_ph));
     lock.unlock();
     request_cond.notify_one();
 }
@@ -949,25 +953,32 @@ void distributed_stream_loader_t::use_these_allocated_variables(const torch::Ten
 /**
  * This function should be called when using the `flyweight` buffer implementation.
  */
- /*
-void distributed_stream_loader_t::use_these_allocated_variables(const torch::Tensor &aug_samples, std::vector<torch::Tensor> &aug_ground_truth,
-                const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
+void distributed_stream_loader_t::use_these_allocated_variables(const torch::Tensor &aug_samples,
+                const torch::Tensor &aug_targets, const torch::Tensor &aug_weights,
+                const torch::Tensor &aug_amp, const torch::Tensor &aug_ph) {
     alloc_aug_samples = aug_samples;
     alloc_aug_targets = aug_targets;
     alloc_aug_weights = aug_weights;
+    alloc_aug_amp = aug_amp;
+    alloc_aug_ph = aug_ph;
 
     client_dest_tensors.push_back(&alloc_aug_samples);
     dest_targets = &alloc_aug_targets;
     dest_weights = &alloc_aug_weights;
+    if (num_samples_per_representative > 1) {
+        client_dest_tensors.push_back(&alloc_aug_amp);
+        client_dest_tensors.push_back(&alloc_aug_ph);
+    }
 
     m_use_allocated_variables = true;
 
     ASSERT(alloc_aug_samples.dim() > 0 && alloc_aug_targets.dim() == 1);
     R = alloc_aug_samples.sizes()[0];
     ASSERT(R > 0 && R == alloc_aug_targets.sizes()[0]
-        && R == alloc_aug_weights.sizes()[0]);
+                 && R == alloc_aug_weights.sizes()[0]
+                 && R == alloc_aug_amp.sizes()[0]
+                 && R == alloc_aug_ph.sizes()[0]);
 }
-*/
 
 /**
  * This is called from Python in a synchronous fashion. We consume the

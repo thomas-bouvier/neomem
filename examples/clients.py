@@ -8,22 +8,6 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class MyDataset(Dataset):
-    def __init__(self, values, labels):
-        super().__init__()
-        self.values = values
-        self.labels = labels
-
-    def __len__(self):
-        return len(self.values)
-
-    def __getitem__(self, index):
-        return self.values[index], self.labels[index]
-
-
-class CustomDataset(Dataset):
-    def __init__(self, size):
-        self.size = size
-
     def __getitem__(self, index):
         tensor = torch.full((3, 224, 224), index % K, dtype=torch.float32)
         label = index % K
@@ -51,20 +35,12 @@ aug_samples2 = torch.zeros(B + R, 3, 224, 224)
 aug_labels2 = torch.randint(high=K, size=(B + R,))
 aug_weights2 = torch.zeros(B + R)
 
-"""
-N_recon = 1000
-
-aug_samples_recon = torch.zeros(B + R, 1, 128, 128)
-aug_targets_recon = torch.zeros(B + R, 1, 128, 128)
-aug_weights_recon = torch.zeros(B + R)
-"""
-
 if __name__ == "__main__":
     torch.manual_seed(0)
     random.seed(0)
     np.random.seed(0)
 
-    dataset = CustomDataset(B)
+    dataset = MyDataset()
     loader = DataLoader(dataset=dataset, batch_size=B,
                             shuffle=True, num_workers=4, pin_memory=True)
 
@@ -107,22 +83,3 @@ if __name__ == "__main__":
     dsl2.finalize()
     engine1.wait_for_finalize()
     engine2.wait_for_finalize()
-
-    """
-    values_recon = np.random.rand(5000, 1, 128, 128)
-    target_recon = np.random.rand(5000, 1, 128, 128)
-    dataset = MyDataset(values_recon, target_recon)
-    loader = DataLoader(dataset=dataset, batch_size=B,
-                        shuffle=True, num_workers=4, pin_memory=True)
-
-    dsl_recon = rehearsal.DistributedStreamLoader.create(
-        rehearsal.Reconstruction, 1, N_recon, C, ctypes.c_int64(torch.random.initial_seed()).value, 0, "tcp://127.0.0.1:1234", 2, [1, 128, 128], False)
-
-    for epoch in range(4):
-        for i, (inputs, target) in enumerate(loader):
-            #inputs, target = inputs.cuda(), target.cuda()
-            print(f"================================{i} (epoch: {epoch})")
-            dsl_recon.accumulate(inputs, target, aug_samples_recon, aug_targets_recon, aug_weights_recon)
-            size = dsl2.wait()
-            print(f"Received {size - B} samples from other nodes")
-    """

@@ -9,7 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 
 class MyDataset(Dataset):
     def __init__(self, values, labels):
-        super(MyDataset, self).__init__()
+        super().__init__()
         self.values = values
         self.labels = labels
 

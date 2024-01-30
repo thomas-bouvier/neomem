@@ -24,9 +24,6 @@ enum BufferStrategy { NoBuffer, CPUBuffer, CUDABuffer };
 struct exposed_memory_t {
     std::vector<std::pair<void*, std::size_t>> segments;
     torch::Tensor* buffer = nullptr;
-    /*
-    std::vector<float> buffer;
-    */
     tl::bulk bulk;
 
     exposed_memory_t() { }
@@ -85,16 +82,16 @@ public:
     void register_endpoints(const std::map<std::string, int>& endpoints);
     void start();
 
+    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets);
     void accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
             const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
-    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets);
-    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets, std::vector<torch::Tensor> &ground_truth,
-            const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, std::vector<torch::Tensor> &aug_ground_truth);
-    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets, std::vector<torch::Tensor> &ground_truth);
+    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph);
+    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph,
+            const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, const torch::Tensor &aug_amp, const torch::Tensor &aug_ph);
     int wait();
 
     void use_these_allocated_variables(const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
-    //void use_these_allocated_variables(const torch::Tensor &aug_samples, std::vector<torch::Tensor> &aug_ground_truth, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
+    void use_these_allocated_variables(const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, const torch::Tensor &aug_amp, const torch::Tensor &aug_ph);
     void enable_augmentation(bool state);
     void measure_performance(bool state);
     size_t get_rehearsal_size();
@@ -147,8 +144,9 @@ protected:
     torch::Tensor alloc_aug_samples;
     torch::Tensor alloc_aug_targets;
     torch::Tensor alloc_aug_weights;
+    torch::Tensor alloc_aug_amp;
+    torch::Tensor alloc_aug_ph;
 
-    //torch::Tensor* dest_samples = nullptr;
     torch::Tensor* dest_targets = nullptr;
     torch::Tensor* dest_weights = nullptr;
 
@@ -182,7 +180,6 @@ protected:
 
     std::vector<torch::Tensor*> client_dest_tensors;
     std::vector<exposed_memory_t> client_mems, server_mems;
-    //exposed_memory_t client_mem, server_mem;
 
     std::vector<std::vector<std::tuple<int, float, size_t, size_t>>> metadata;
 };

@@ -12,28 +12,27 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 
-class CustomDataset(Dataset):
-    def __init__(self, size):
-        self.size = size
+class MyDataset(Dataset):
+    def __init__(self, K):
+        self.K = K
 
     def __getitem__(self, index):
-        tensor = torch.full((3, 224, 224), index % K, dtype=torch.float32)
-        label = index % K
+        tensor = torch.full((3, 224, 224), index % self.K, dtype=torch.float32)
+        label = index % self.K
         return tensor, label
 
     def __len__(self):
         return 5000 # Total number of samples in the dataset
 
-# num_classes
-K = 100
-# rehearsal_size
-N = 65
-# num_candidates
-C = 20
-# num_representatives
-R = 20
-# batch_size
-B = 128
+class PtychoDataset(Dataset):
+    def __getitem__(self, index):
+        tensor = torch.full((1, 256, 256), index, dtype=torch.float32)
+        amp = torch.full((1, 256, 256), index + 1000, dtype=torch.float32)
+        ph = torch.full((1, 256, 256), index + 2000, dtype=torch.float32)
+        return tensor, 0, amp, ph
+
+    def __len__(self):
+        return 2500
 
 def skip_or_fail_gpu_test(test, message):
     """Fails the test if GPUs are required, otherwise skips."""
@@ -44,7 +43,7 @@ def skip_or_fail_gpu_test(test, message):
 
 class TorchTests(unittest.TestCase):
 
-    verbose = False
+    verbose = True
 
     def setup(self):
         torch.manual_seed(0)
@@ -58,6 +57,17 @@ class TorchTests(unittest.TestCase):
     def test_neomem_multiple_clients(self):
         self.skipTest("Multiple providers")
 
+        # num_classes
+        K = 100
+        # rehearsal_size
+        N = 65
+        # num_candidates
+        C = 20
+        # num_representatives
+        R = 20
+        # batch_size
+        B = 32
+
         aug_samples = torch.zeros(B + R, 3, 224, 224)
         aug_labels = torch.randint(high=K, size=(B + R,))
         aug_weights = torch.zeros(B + R)
@@ -66,7 +76,7 @@ class TorchTests(unittest.TestCase):
         aug_labels2 = torch.randint(high=K, size=(B + R,))
         aug_weights2 = torch.zeros(B + R)
 
-        dataset = CustomDataset(B)
+        dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B,
                                 shuffle=True, num_workers=4, pin_memory=True)
 
@@ -74,14 +84,16 @@ class TorchTests(unittest.TestCase):
         dsl1 = neomem.DistributedStreamLoader(
             engine1,
             neomem.Classification, K, N, R, C,
-            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
+            ctypes.c_int64(torch.random.initial_seed()).value,
+            1, [3, 224, 224], neomem.CPUBuffer, False, True
         )
 
         engine2 = neomem.EngineLoader("tcp://127.0.0.1:1235", 1, False)
         dsl2 = neomem.DistributedStreamLoader(
             engine2,
             neomem.Classification, K, N, R, C,
-            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, True
+            ctypes.c_int64(torch.random.initial_seed()).value,
+            1, [3, 224, 224], neomem.CPUBuffer, False, True
         )
 
         dsl1.register_endpoints({'tcp://127.0.0.1:1234': 0, 'tcp://127.0.0.1:1235': 1})
@@ -112,18 +124,30 @@ class TorchTests(unittest.TestCase):
 
         Parameter `size` will have a max value of B + R.
         """
+        # num_classes
+        K = 100
+        # rehearsal_size
+        N = 65
+        # num_candidates
+        C = 20
+        # num_representatives
+        R = 20
+        # batch_size
+        B = 32
+
         aug_samples = torch.zeros(B + R, 3, 224, 224)
         aug_labels = torch.randint(high=K, size=(B + R,))
         aug_weights = torch.zeros(B + R)
 
-        dataset = CustomDataset(B)
+        dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
         dsl = neomem.DistributedStreamLoader.create(
             engine,
             neomem.Classification, K, N, R, C,
-            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
+            ctypes.c_int64(torch.random.initial_seed()).value,
+            1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
         dsl.enable_augmentation(True)
@@ -154,18 +178,30 @@ class TorchTests(unittest.TestCase):
 
         Parameter `size` will have a max value of R.
         """
+        # num_classes
+        K = 100
+        # rehearsal_size
+        N = 65
+        # num_candidates
+        C = 20
+        # num_representatives
+        R = 20
+        # batch_size
+        B = 32
+
         aug_samples = torch.zeros(R, 3, 224, 224)
         aug_labels = torch.randint(high=K, size=(R,))
         aug_weights = torch.zeros(R)
 
-        dataset = CustomDataset(B)
+        dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
         dsl = neomem.DistributedStreamLoader.create(
             engine,
             neomem.Classification, K, N, R, C,
-            ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
+            ctypes.c_int64(torch.random.initial_seed()).value,
+            1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
         dsl.enable_augmentation(True)
@@ -183,15 +219,132 @@ class TorchTests(unittest.TestCase):
         dsl.finalize()
         engine.wait_for_finalize()
 
+    def test_neomem_standard_ptycho_buffer(self):
+        """Test the case where a representative is composed of multiple
+        samples.
+        """
+        self.skipTest("skip")
+        # num_classes
+        K = 1
+        # rehearsal_size
+        N = 650
+        # num_candidates
+        C = 20
+        # num_representatives
+        R = 20
+        # batch_size
+        B = 32
+
+        aug_samples_recon = torch.zeros(B + R, 1, 256, 256)
+        aug_targets_recon = torch.zeros(B + R)
+        aug_weights_recon = torch.zeros(B + R)
+        aug_amp = torch.zeros(B + R, 1, 256, 256)
+        aug_ph = torch.zeros(B + R, 1, 256, 256)
+
+        dataset = PtychoDataset()
+        loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
+
+        engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
+        dsl = neomem.DistributedStreamLoader.create(
+            engine,
+            neomem.Classification, K, N, R, C,
+            ctypes.c_int64(torch.random.initial_seed()).value,
+            3, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
+        )
+        dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
+        dsl.enable_augmentation(True)
+        dsl.start()
+
+        for _ in range(2):
+            for inputs, target, amp, ph in loader:
+                dsl.accumulate(
+                    inputs,
+                    target,
+                    amp,
+                    ph,
+                    aug_samples_recon,
+                    aug_targets_recon,
+                    aug_weights_recon,
+                    aug_amp,
+                    aug_ph
+                )
+                size = dsl.wait()
+
+                for j in range(B, size):
+                    assert torch.all(aug_samples_recon[j] == aug_amp[j] - torch.full((1, 256, 256), 1000, dtype=torch.float32))
+                    assert torch.all(aug_samples_recon[j] == aug_ph[j] - torch.full((1, 256, 256), 2000, dtype=torch.float32))
+
+        dsl.finalize()
+        engine.wait_for_finalize()
+
+    def test_neomem_flyweight_ptycho_buffer(self):
+        """Test the case where a representative is composed of multiple
+        samples.
+        """
+        # num_classes
+        K = 1
+        # rehearsal_size
+        N = 650
+        # num_candidates
+        C = 20
+        # num_representatives
+        R = 20
+        # batch_size
+        B = 32
+
+        aug_samples_recon = torch.zeros(R, 1, 256, 256)
+        aug_targets_recon = torch.zeros(R)
+        aug_weights_recon = torch.zeros(R)
+        aug_amp = torch.zeros(R, 1, 256, 256)
+        aug_ph = torch.zeros(R, 1, 256, 256)
+
+        dataset = PtychoDataset()
+        loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
+
+        engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
+        dsl = neomem.DistributedStreamLoader.create(
+            engine,
+            neomem.Classification, K, N, R, C,
+            ctypes.c_int64(torch.random.initial_seed()).value,
+            3, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
+        )
+        dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
+        dsl.enable_augmentation(True)
+        dsl.use_these_allocated_variables(aug_samples_recon, aug_targets_recon, aug_weights_recon, aug_amp, aug_ph)
+        dsl.start()
+
+        for _ in range(2):
+            for inputs, target, amp, ph in loader:
+                dsl.accumulate(inputs, target, amp, ph)
+                size = dsl.wait()
+
+                for j in range(B, size):
+                    assert torch.all(aug_samples_recon[j] == aug_amp[j] - torch.full((1, 256, 256), 1000, dtype=torch.float32))
+                    assert torch.all(aug_samples_recon[j] == aug_ph[j] - torch.full((1, 256, 256), 2000, dtype=torch.float32))
+
+        dsl.finalize()
+        engine.wait_for_finalize()
+
     def test_neomem_engine_shutdown(self):
         """Test that a single rehearsal buffer can be properly shut down,
         and that a second can be started without causing any crash.
         """
+        # num_classes
+        K = 100
+        # rehearsal_size
+        N = 65
+        # num_candidates
+        C = 20
+        # num_representatives
+        R = 20
+        # batch_size
+        B = 32
+
         aug_samples = torch.zeros(B + R, 3, 224, 224)
         aug_labels = torch.randint(high=K, size=(B + R,))
         aug_weights = torch.zeros(B + R)
 
-        dataset = CustomDataset(B)
+        dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
         for _ in range(2):
@@ -199,7 +352,8 @@ class TorchTests(unittest.TestCase):
             dsl = neomem.DistributedStreamLoader.create(
                 engine,
                 neomem.Classification, K, N, R, C,
-                ctypes.c_int64(torch.random.initial_seed()).value, 1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
+                ctypes.c_int64(torch.random.initial_seed()).value,
+                1, [3, 224, 224], neomem.CPUBuffer, False, self.verbose
             )
             dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
             dsl.enable_augmentation(True)
