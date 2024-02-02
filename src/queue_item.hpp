@@ -7,6 +7,7 @@
 
 struct queue_item_t {
     torch::Tensor samples, targets, weights, aug_samples, aug_targets, aug_weights;
+    torch::Tensor activations;
     torch::Tensor amp, ph, aug_amp, aug_ph;
 
     int size = 0;
@@ -17,6 +18,19 @@ struct queue_item_t {
         samples(_samples), targets(_targets) {
             ASSERT(targets.dim() == 1);
             ASSERT(samples.sizes()[0] == targets.sizes()[0]);
+            size = samples.sizes()[0];
+
+            weights = torch::ones({size}, torch::TensorOptions().dtype(torch::kFloat32).device(samples.device()));
+    }
+
+    queue_item_t(const torch::Tensor &_samples, const torch::Tensor &_targets, const torch::Tensor &_activations) :
+        samples(_samples), targets(_targets), activations(_activations) {
+            ASSERT(targets.dim() == 1);
+            ASSERT(samples.sizes()[0] == targets.sizes()[0]);
+            // The following assertation will fail if batches get truncated at the
+            // end of the epoch, as activations and corresponding training data
+            // are off sync by one iteration.
+            // ASSERT(samples.sizes()[0] == activations.sizes()[0]);
             size = samples.sizes()[0];
 
             weights = torch::ones({size}, torch::TensorOptions().dtype(torch::kFloat32).device(samples.device()));

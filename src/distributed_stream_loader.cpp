@@ -51,17 +51,24 @@ void checkLast(const char* const file, const int line) {
  * content of its rehearsal buffer by sampling from the n other rehearsal
  * buffers.
  */
-distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& _engine_loader, Task _task_type,
-    unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
-    unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
-    BufferStrategy _buffer_strategy, bool discover_endpoints, bool _verbose)
-        : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id()),
-        m_provider_id(_engine_loader.get_id()),
-        task_type(_task_type), K(_K), N(_N), R(_R), C(_C), rand_gen(seed),
-        num_samples_per_representative(_num_samples_per_representative),
-        representative_shape(_representative_shape), buffer_strategy(_buffer_strategy), verbose(_verbose) {
+distributed_stream_loader_t::distributed_stream_loader_t(
+        const engine_loader_t& _engine_loader, Task _task_type,
+        unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
+        unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
+        BufferStrategy _buffer_strategy, bool discover_endpoints, bool _verbose)
+              : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id()),
+                m_provider_id(_engine_loader.get_id()),
+                task_type(_task_type), K(_K), N(_N), R(_R), C(_C), rand_gen(seed),
+                num_samples_per_representative(_num_samples_per_representative),
+                representative_shape(_representative_shape), buffer_strategy(_buffer_strategy), verbose(_verbose)
+{
     // 4 is the number of bytes in a float32
-    num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
+    num_bytes_per_representative = 4 * std::accumulate(
+        representative_shape.begin(),
+        representative_shape.end(),
+        1,
+        std::multiplies<int>()
+    );
 
     m_server_procedure = define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
@@ -128,7 +135,8 @@ distributed_stream_loader_t::distributed_stream_loader_t(const engine_loader_t& 
  * Contact all other nodes to get their endpoints. The returned dictionary maps
  * endpoints (keys) to provider ids (values).
  */
-std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() {
+std::map<std::string, int> distributed_stream_loader_t::gather_endpoints()
+{
     nvtx3::scoped_range nvtx{"gather_endpoints"};
 
     std::map<std::string, int> endpoints = {{get_engine().self(), m_provider_id}};
@@ -140,7 +148,8 @@ std::map<std::string, int> distributed_stream_loader_t::gather_endpoints() {
 /**
  *
  */
-void distributed_stream_loader_t::register_endpoints(const std::map<std::string, int>& endpoints) {
+void distributed_stream_loader_t::register_endpoints(const std::map<std::string, int>& endpoints)
+{
     nvtx3::scoped_range nvtx{"register_endpoints"};
 
     for (auto endpoint : endpoints) {
@@ -154,7 +163,8 @@ void distributed_stream_loader_t::register_endpoints(const std::map<std::string,
 /**
  * Initialize
  */
-void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
+void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers)
+{
     nvtx3::scoped_range nvtx{"init_rehearsal_buffer"};
 
     auto size = K * N * num_samples_per_representative;
@@ -162,8 +172,8 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
 
     auto rehearsal_shape = representative_shape;
     rehearsal_shape.insert(rehearsal_shape.begin(), size);
-    rehearsal_tensor = new torch::Tensor(torch::empty(rehearsal_shape, options));
-    ASSERT(rehearsal_tensor->is_contiguous());
+    rehearsal_representatives = new torch::Tensor(torch::empty(rehearsal_shape, options));
+    ASSERT(rehearsal_representatives->is_contiguous());
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 1.0));
     rehearsal_counts.insert(rehearsal_counts.begin(), K, 0);
 
@@ -194,7 +204,8 @@ void distributed_stream_loader_t::init_rehearsal_buffers(bool pin_buffers) {
  * - the 'allocated policy'
  * - the buffer strategy, NoBuffer, CPUBuffer or CUDABuffer
  */
-void distributed_stream_loader_t::init_receiving_rdma_buffer() {
+void distributed_stream_loader_t::init_receiving_rdma_buffer()
+{
     nvtx3::scoped_range nvtx{"init_receiving_rdma_buffer"};
 
     if (buffer_strategy == NoBuffer) {
@@ -246,7 +257,8 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer() {
 /**
  * Start the thread disptaching rpcs to prepare the next augmented minibatch.
  */
-void distributed_stream_loader_t::start() {
+void distributed_stream_loader_t::start()
+{
     // The thread executing the actual client issuing rpcs
     es = tl::xstream::create();
     async_thread = es->make_thread([this]() {
@@ -262,7 +274,8 @@ void distributed_stream_loader_t::start() {
  *
  * Should be executed in a dedicated thread.
  */
-void distributed_stream_loader_t::async_process() {
+void distributed_stream_loader_t::async_process()
+{
     while (true) {
         nvtx3::mark("while start in async_process");
 
@@ -285,7 +298,7 @@ void distributed_stream_loader_t::async_process() {
 
         // Initialization of the augmented result, which changes at every
         // iteration with implementation `standard`
-        if (!m_use_allocated_variables) {
+        if (!m_use_allocated_variables && !m_store_states) {
             client_dest_tensors.clear();
             client_dest_tensors.push_back(&batch.aug_samples);
             dest_targets = &batch.aug_targets;
@@ -342,7 +355,8 @@ void distributed_stream_loader_t::async_process() {
  * Copy incoming sample/target pairs and associated weights to the next
  * augmented minibatch.
  */
-void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch) {
+void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch)
+{
     nvtx3::scoped_range nvtx{"copy_last_batch"};
     if (verbose)
         DBG("[" << m_provider_id << "] Copying last batch!");
@@ -429,7 +443,8 @@ void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch) {
  * 3) Copy samples that have been written to the exposed memory to the
  * minibatch to augment `dest_samples`.
  */
-void distributed_stream_loader_t::augment_batch(queue_item_t &batch) {
+void distributed_stream_loader_t::augment_batch(queue_item_t &batch)
+{
     nvtx3::scoped_range nvtx{"augment_batch"};
 
     // Dispatch rpcs to other processes
@@ -441,24 +456,39 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch) {
 /**
  * This function dispatches rpc requests to get R remote representatives.
  */
-std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses) {
+std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses)
+{
     if (verbose)
         DBG("[" << m_provider_id << "] Dispatching rpcs");
 
     std::vector<tl::bulk> client_bulks;
-    for (size_t i = 0; i < client_mems.size(); i++)
+    for (size_t i = 0; i < client_mems.size(); i++) {
         client_bulks.push_back(client_mems[i].bulk);
+    }
 
     // Iterate over nodes and issuing corresponding rpc requests
     std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
-    auto j = 0;
+
+    auto offset = 0;
     for (const auto& indices : indices_per_node) {
         tl::provider_handle& ph = provider_handles[indices.first];
-        auto response = m_client_procedure.on(ph).async(client_bulks, indices.second, j);
-        responses.push_back(std::move(response));
 
-        // Valid because the offset and num_bytes_per_representatives are equal for each sample (including amp and ph)
-        j += indices.second.size() * num_bytes_per_representative;
+        if (m_store_states) {
+            auto response = m_client_procedure.on(ph).async(
+                client_bulks, indices.second, offset,
+                client_activations_mem.bulk
+            );
+            responses.push_back(std::move(response));
+        } else {
+            auto response = m_client_procedure.on(ph).async(
+                client_bulks, indices.second, offset,
+                tl::bulk()
+            );
+            responses.push_back(std::move(response));
+        }
+
+        // Valid because the offset and num_bytes_per_representative are equal for each sample (including amp and ph)
+        offset += indices.second.size();
     }
     ASSERT(responses.size() == indices_per_node.size());
 
@@ -471,7 +501,8 @@ std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_res
  * representing the minibatch to augment, i.e., `batch.aug_samples` or
  * `alloc_aug_samples`.
  */
-void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& responses, queue_item_t &batch) {
+void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& responses, queue_item_t &batch)
+{
     if (verbose)
         DBG("[" << m_provider_id << "] Resolving rpcs...");
 
@@ -492,7 +523,7 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
             const size_t* offset = &std::get<3>(it);
 
             if (*num_targets > 0) {
-                memory_sections.emplace_back(*offset, *num_targets * num_bytes_per_representative);
+                memory_sections.emplace_back(*offset, *num_targets);
             }
 
             for (size_t j = 0; j < *num_targets; j++) {
@@ -537,10 +568,12 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
 /**
  * Returns a vector to keep the same order.
  */
-std::vector<std::pair<int, int>> distributed_stream_loader_t::merge_contiguous_memory(std::vector<std::pair<int, int>>& sections) const {
+std::vector<std::pair<int, int>> distributed_stream_loader_t::merge_contiguous_memory(std::vector<std::pair<int, int>>& sections) const
+{
     std::vector<std::pair<int, int>> mergedPairs;
-    if (sections.empty())
+    if (sections.empty()) {
         return mergedPairs;
+    }
 
     // Sort the sections based on the memory offset (first element of the pair)
     std::sort(sections.begin(), sections.end());
@@ -567,7 +600,8 @@ std::vector<std::pair<int, int>> distributed_stream_loader_t::merge_contiguous_m
  * (`batch.aug_samples`)  or has been allocated once at the beginning of the
  * execution (`alloc_aug_samples`).
  */
-void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections) {
+void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections)
+{
     nvtx3::scoped_range nvtx{"copy_exposed_buffer_to_aug_batch"};
 
     auto cumulated_offset = 0;
@@ -577,9 +611,9 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_i
 #ifndef WITHOUT_CUDA
         for (size_t r = 0; r < num_samples_per_representative; r++) {
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                (char *) client_dest_tensors[r]->data_ptr() + batch.m_augmentation_mark * num_bytes_per_representative + cumulated_offset,
-                (char *) client_mems[r].buffer->data_ptr() + pair.first,
-                pair.second,
+                (char *) client_dest_tensors[r]->data_ptr() + (batch.m_augmentation_mark + cumulated_offset) * num_bytes_per_representative,
+                (char *) client_mems[r].buffer->data_ptr() + pair.first * num_bytes_per_representative,
+                pair.second * num_bytes_per_representative,
                 cudaMemcpyDefault,
                 m_streams[0]
             ));
@@ -587,9 +621,16 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_i
 #else
         for (size_t r = 0; r < num_samples_per_representative; r++) {
             std::memcpy(
-                (char *) client_dest_tensors[r]->data_ptr() + batch.m_augmentation_mark * num_bytes_per_representative + cumulated_offset,
-                (char *) client_mems[r].buffer->data_ptr() + pair.first,
-                pair.second
+                (char *) client_dest_tensors[r]->data_ptr() + (batch.m_augmentation_mark + cumulated_offset) * num_bytes_per_representative,
+                (char *) client_mems[r].buffer->data_ptr() + pair.first * num_bytes_per_representative,
+                pair.second * num_bytes_per_representative
+            );
+        }
+        if (m_store_states) {
+            std::memcpy(
+                (char *) dest_activations->data_ptr() + cumulated_offset * num_bytes_per_activation,
+                (char *) client_activations_mem.buffer->data_ptr() + pair.first * num_bytes_per_activation,
+                pair.second * num_bytes_per_activation
             );
         }
 #endif
@@ -605,7 +646,8 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_i
  * The map returned by this function maps remote node indices to local indices.
  * Local indices might be used to access the provider_handles vector.
  */
-std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int R) {
+std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int R)
+{
     nvtx3::scoped_range nvtx{"pick_random_indices"};
 
     const unsigned int max_global_index = provider_handles.size() * K * N;
@@ -636,7 +678,8 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
  * Sample C random elements from the given batch to populate the rehearsal
  * buffer.
  */
-void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch) {
+void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& batch)
+{
     nvtx3::scoped_range nvtx{"populate_rehearsal_buffer"};
 
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
@@ -661,7 +704,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         ASSERT(j < K * N);
 #ifndef WITHOUT_CUDA
         CHECK_CUDA_ERROR(cudaMemcpyAsync(
-            (char *) rehearsal_tensor->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j,
+            (char *) rehearsal_representatives->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j,
             (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
             num_bytes_per_representative,
             cudaMemcpyDefault,
@@ -669,7 +712,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         ));
         for (size_t r = 0; r < num_samples_per_representative - 1; r++) {
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                (char *) rehearsal_tensor->data_ptr() + num_samples_per_representative * num_bytes_per_representative * j + num_bytes_per_representative * (r + 1),
+                (char *) rehearsal_representatives->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j + (r + 1)),
                 (char *) batch.ground_truth[r].data_ptr() + num_bytes_per_representative * i,
                 num_bytes_per_representative,
                 cudaMemcpyDefault,
@@ -678,20 +721,27 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         }
 #else
         std::memcpy(
-            (char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j),
+            (char *) rehearsal_representatives->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j),
             (char *) batch.samples.data_ptr() + num_bytes_per_representative * i,
             num_bytes_per_representative
         );
         if (num_samples_per_representative > 1) {
             std::memcpy(
-                (char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j + (0 + 1)),
+                (char *) rehearsal_representatives->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j + (0 + 1)),
                 (char *) batch.amp.data_ptr() + num_bytes_per_representative * i,
                 num_bytes_per_representative
             );
             std::memcpy(
-                (char *) rehearsal_tensor->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j + (1 + 1)),
+                (char *) rehearsal_representatives->data_ptr() + num_bytes_per_representative * (num_samples_per_representative * j + (1 + 1)),
                 (char *) batch.ph.data_ptr() + num_bytes_per_representative * i,
                 num_bytes_per_representative
+            );
+        }
+        if (m_store_states) {
+            std::memcpy(
+                (char *) rehearsal_activations->data_ptr() + num_bytes_per_activation * j,
+                (char *) batch.activations.data_ptr() + num_bytes_per_activation * i,
+                num_bytes_per_activation
             );
         }
 #endif
@@ -715,7 +765,8 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
  * With big datasets like ImageNet, the following formula results in really
  * small weights. Keeping this function as future work.
  */
-void distributed_stream_loader_t::update_representative_weights(const queue_item_t& batch, int num_representatives) {
+void distributed_stream_loader_t::update_representative_weights(const queue_item_t& batch, int num_representatives)
+{
     nvtx3::scoped_range nvtx{"update_representative_weights"};
 
     float weight = (float) batch.get_size() / (float) (num_representatives * m_rehearsal_size);
@@ -730,7 +781,11 @@ void distributed_stream_loader_t::update_representative_weights(const queue_item
  *
  * j is the offset where this server procedure should write into the client buffer.
  */
-void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int client_bulks_offset) {
+void distributed_stream_loader_t::get_remote_samples(
+        const tl::request& req,
+        std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int offset, 
+        tl::bulk& client_activations_bulk)
+{
     nvtx3::scoped_range nvtx{"get_remote_samples"};
 
     int c = 0, o = 0;
@@ -783,7 +838,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
     if (verbose && c > 0) {
         std::cout << "[" << m_provider_id << "] Sending " << c << "/" << indices.size()  << " representatives from "
             << samples.size() << " different classes to remote node (endpoint: "
-            << req.get_endpoint() << ", writing at offset " << client_bulks_offset << " for all " << client_bulks.size() << " client bulks)" << std::endl;
+            << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_bulks.size() << " client bulks)" << std::endl;
     }
 
     /**
@@ -812,7 +867,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
         std::vector<int> reprs_indices;
         std::tie(label, weight, reprs_indices) = el;
 
-        attached_metadata.emplace_back(std::make_tuple(label, weight, reprs_indices.size(), client_bulks_offset + o * num_bytes_per_representative));
+        attached_metadata.emplace_back(std::make_tuple(label, weight, reprs_indices.size(), offset + o));
 
         for (size_t i = 0; i < reprs_indices.size(); i++) {
 #ifndef WITHOUT_CUDA
@@ -820,7 +875,7 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
                 const int index = num_samples_per_representative * reprs_indices[i] + r;
                 CHECK_CUDA_ERROR(cudaMemcpyAsync(
                     (char *) server_mems[r].buffer->data_ptr() + num_bytes_per_representative * o,
-                    rehearsal_tensor->index({index}).data_ptr(),
+                    rehearsal_representatives->index({index}).data_ptr(),
                     num_bytes_per_representative,
                     cudaMemcpyDefault,
                     m_streams[2]
@@ -829,7 +884,11 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
 #else
             for (size_t r = 0; r < num_samples_per_representative; r++) {
                 const int index = num_samples_per_representative * reprs_indices[i] + r;
-                server_mems[r].buffer->index_put_({o}, rehearsal_tensor->index({index}));
+                server_mems[r].buffer->index_put_({o}, rehearsal_representatives->index({index}));
+            }
+            if (m_store_states) {
+                const int index = reprs_indices[i];
+                server_activations_mem.buffer->index_put_({o}, rehearsal_activations->index({index}));
             }
 #endif
             o++;
@@ -843,9 +902,16 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
         // The rehearsal_mutex is still held
         cudaStreamSynchronize(m_streams[2]);
 #endif
-        auto size = c * num_bytes_per_representative;
+
+        auto num_bytes_representatives = c * num_bytes_per_representative;
         for (size_t r = 0; r < num_samples_per_representative; r++) {
-            server_mems[r].bulk(0, size) >> client_bulks[r](client_bulks_offset, size).on(req.get_endpoint());
+            server_mems[r].bulk(0, num_bytes_representatives)
+                >> client_bulks[r](offset * num_bytes_per_representative, num_bytes_representatives).on(req.get_endpoint());
+        }
+        if (m_store_states) {
+            auto num_bytes_activations = c * num_bytes_per_activation;
+            server_activations_mem.bulk(0, num_bytes_activations)
+                >> client_activations_bulk(offset * num_bytes_per_activation, num_bytes_activations).on(req.get_endpoint());
         }
     }
 
@@ -862,7 +928,8 @@ void distributed_stream_loader_t::get_remote_samples(const tl::request& req, std
  * before and these given variables will be populated. The resulting
  * batch.aug_size will have a min value of 0.
  */
-void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets) {
+void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets)
+{
     nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
@@ -885,8 +952,10 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
  *
  * batch.aug_size will have a min value of the minibatch size defined in Python.
  */
-void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
-                 const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
+void distributed_stream_loader_t::accumulate(
+        const torch::Tensor &samples, const torch::Tensor &targets,
+        const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights)
+{
     nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
@@ -900,11 +969,17 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
     request_cond.notify_one();
 }
 
-void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph) {
+/**
+ * Ptycho version.
+ */
+void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph)
+{
     nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
         throw std::runtime_error("Call start() before accumulate()");
+    if (!m_use_allocated_variables)
+        throw std::runtime_error("You didn't pass variables to augment, so you should call use_these_allocated_variables() before accumulate()");
 
     std::unique_lock<tl::mutex> lock(request_mutex);
     while (request_queue.size() == MAX_QUEUE_SIZE)
@@ -914,8 +989,13 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
     request_cond.notify_one();
 }
 
-void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph,
-                 const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, const torch::Tensor &aug_amp, const torch::Tensor &aug_ph) {
+/**
+ * Ptycho version.
+ */
+void distributed_stream_loader_t::accumulate(
+        const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph,
+        const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, const torch::Tensor &aug_amp, const torch::Tensor &aug_ph)
+{
     nvtx3::scoped_range nvtx{"accumulate"};
 
     if (!started)
@@ -930,37 +1010,66 @@ void distributed_stream_loader_t::accumulate(const torch::Tensor &samples, const
 }
 
 /**
+ * State version.
+ */
+void distributed_stream_loader_t::accumulate_state(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &activations)
+{
+    nvtx3::scoped_range nvtx{"accumulate_state"};
+
+    if (!started)
+        throw std::runtime_error("Call start() before accumulate_state()");
+    if (!m_store_states)
+        throw std::runtime_error("You didn't pass variables to augment, so you should call use_these_allocated_variables_state() before accumulate_state()");
+
+    std::unique_lock<tl::mutex> lock(request_mutex);
+    while (request_queue.size() == MAX_QUEUE_SIZE)
+        request_cond.wait(lock);
+    request_queue.emplace_back(queue_item_t(samples, targets, activations));
+    lock.unlock();
+    request_cond.notify_one();
+}
+
+/**
  * This function should be called when using the `flyweight` buffer implementation.
  */
-void distributed_stream_loader_t::use_these_allocated_variables(const torch::Tensor &aug_samples,
-                const torch::Tensor &aug_targets, const torch::Tensor &aug_weights) {
-    alloc_aug_samples = aug_samples;
-    alloc_aug_targets = aug_targets;
-    alloc_aug_weights = aug_weights;
+void distributed_stream_loader_t::use_these_allocated_variables(const torch::Tensor &buf_samples, const torch::Tensor &buf_targets, const torch::Tensor &buf_weights)
+{
+    alloc_aug_samples = buf_samples;
+    alloc_aug_targets = buf_targets;
+    alloc_aug_weights = buf_weights;
+
+    ASSERT(alloc_aug_samples.dim() > 0 && alloc_aug_targets.dim() == 1);
+    R = alloc_aug_samples.sizes()[0];
+    ASSERT(R > 0 && R == alloc_aug_targets.sizes()[0]
+        && R == alloc_aug_weights.sizes()[0]);
 
     client_dest_tensors.push_back(&alloc_aug_samples);
     dest_targets = &alloc_aug_targets;
     dest_weights = &alloc_aug_weights;
 
     m_use_allocated_variables = true;
-
-    ASSERT(alloc_aug_samples.dim() > 0 && alloc_aug_targets.dim() == 1);
-    R = alloc_aug_samples.sizes()[0];
-    ASSERT(R > 0 && R == alloc_aug_targets.sizes()[0]
-        && R == alloc_aug_weights.sizes()[0]);
 }
 
 /**
  * This function should be called when using the `flyweight` buffer implementation.
+ *
+ * Ptycho version.
  */
-void distributed_stream_loader_t::use_these_allocated_variables(const torch::Tensor &aug_samples,
-                const torch::Tensor &aug_targets, const torch::Tensor &aug_weights,
-                const torch::Tensor &aug_amp, const torch::Tensor &aug_ph) {
-    alloc_aug_samples = aug_samples;
-    alloc_aug_targets = aug_targets;
-    alloc_aug_weights = aug_weights;
-    alloc_aug_amp = aug_amp;
-    alloc_aug_ph = aug_ph;
+void distributed_stream_loader_t::use_these_allocated_variables(
+        const torch::Tensor &buf_samples, const torch::Tensor &buf_targets, const torch::Tensor &buf_weights, const torch::Tensor &buf_amp, const torch::Tensor &buf_ph)
+{
+    alloc_aug_samples = buf_samples;
+    alloc_aug_targets = buf_targets;
+    alloc_aug_weights = buf_weights;
+    alloc_aug_amp = buf_amp;
+    alloc_aug_ph = buf_ph;
+
+    ASSERT(alloc_aug_samples.dim() > 0 && alloc_aug_targets.dim() == 1);
+    R = alloc_aug_samples.sizes()[0];
+    ASSERT(R > 0 && R == alloc_aug_targets.sizes()[0]
+                 && R == alloc_aug_weights.sizes()[0]
+                 && R == alloc_aug_amp.sizes()[0]
+                 && R == alloc_aug_ph.sizes()[0]);
 
     client_dest_tensors.push_back(&alloc_aug_samples);
     dest_targets = &alloc_aug_targets;
@@ -971,13 +1080,82 @@ void distributed_stream_loader_t::use_these_allocated_variables(const torch::Ten
     }
 
     m_use_allocated_variables = true;
+}
+
+/**
+ * This function should be called when using the `flyweight` buffer implementation.
+ *
+ * State version.
+ */
+void distributed_stream_loader_t::use_these_allocated_variables_state(
+        const torch::Tensor &buf_samples, const torch::Tensor &buf_targets, const torch::Tensor &buf_weights,
+        const torch::Tensor &buf_activations, std::vector<long> activation_shape)
+{
+    alloc_aug_samples = buf_samples;
+    alloc_aug_targets = buf_targets;
+    alloc_aug_weights = buf_weights;
+    alloc_aug_activations = buf_activations;
 
     ASSERT(alloc_aug_samples.dim() > 0 && alloc_aug_targets.dim() == 1);
     R = alloc_aug_samples.sizes()[0];
     ASSERT(R > 0 && R == alloc_aug_targets.sizes()[0]
-                 && R == alloc_aug_weights.sizes()[0]
-                 && R == alloc_aug_amp.sizes()[0]
-                 && R == alloc_aug_ph.sizes()[0]);
+        && R == alloc_aug_weights.sizes()[0]);
+
+    client_dest_tensors.push_back(&alloc_aug_samples);
+    dest_targets = &alloc_aug_targets;
+    dest_weights = &alloc_aug_weights;
+    dest_activations = &alloc_aug_activations;
+
+    m_store_states = true;
+
+    bool pin_buffers = torch::cuda::is_available();
+    auto options = torch::TensorOptions()
+                            .dtype(torch::kFloat32)
+                            .device(torch::kCPU)
+                            .pinned_memory(pin_buffers);
+
+    // 4 is the number of bytes in a float32
+    num_bytes_per_activation = 4 * std::accumulate(
+        activation_shape.begin(),
+        activation_shape.end(),
+        1,
+        std::multiplies<int>()
+    );
+
+    auto rehearsal_activations_shape = activation_shape;
+    rehearsal_activations_shape.insert(rehearsal_activations_shape.begin(), K * N);
+    rehearsal_activations = new torch::Tensor(torch::empty(rehearsal_activations_shape, options));
+    ASSERT(rehearsal_activations->is_contiguous());
+
+    if (verbose)
+        DBG("[" << m_provider_id << "] Distributed buffer memory allocated for activations!");
+
+    auto bulk_activations_shape = activation_shape;
+    bulk_activations_shape.insert(bulk_activations_shape.begin(), R);
+
+    // Initializing server bulk
+    server_activations_mem.buffer = new torch::Tensor(torch::empty(bulk_activations_shape, options));
+    server_activations_mem.segments.emplace_back(server_activations_mem.buffer->data_ptr(), R * num_bytes_per_activation);
+    server_activations_mem.bulk = get_engine().expose(server_activations_mem.segments, tl::bulk_mode::read_only);
+
+    if (verbose)
+        DBG("[" << m_provider_id << "] Server activations mem initialized!");
+
+    // Initializing client bulk
+    client_activations_mem.buffer = new torch::Tensor(torch::ones(bulk_activations_shape, options));
+
+    struct hg_bulk_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    if (client_activations_mem.buffer->is_cuda())
+        attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_CUDA;
+    else
+        attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
+
+    client_activations_mem.segments.emplace_back(client_activations_mem.buffer->data_ptr(), R * num_bytes_per_activation);
+    client_activations_mem.bulk = get_engine().expose(client_activations_mem.segments, tl::bulk_mode::write_only, attr);
+
+    if (verbose)
+        DBG("[" << m_provider_id << "] Client activations mem initialized!");
 }
 
 /**
@@ -985,7 +1163,8 @@ void distributed_stream_loader_t::use_these_allocated_variables(const torch::Ten
  * data processed by the client thread. If no data is ready, we just wait,
  * blocking the Python thread.
  */
-int distributed_stream_loader_t::wait() {
+int distributed_stream_loader_t::wait()
+{
     nvtx3::scoped_range nvtx{"wait"};
 
     std::unique_lock<tl::mutex> lock(request_mutex);
@@ -996,25 +1175,30 @@ int distributed_stream_loader_t::wait() {
     return batch.aug_size;
 }
 
-void distributed_stream_loader_t::enable_augmentation(bool state) {
+void distributed_stream_loader_t::enable_augmentation(bool state)
+{
     m_augmentation_enabled = state;
 }
 
-void distributed_stream_loader_t::measure_performance(bool state) {
+void distributed_stream_loader_t::measure_performance(bool state)
+{
     m_measure_performance = state;
 }
 
-size_t distributed_stream_loader_t::get_rehearsal_size() {
+size_t distributed_stream_loader_t::get_rehearsal_size()
+{
     return m_rehearsal_size;
 }
 
-std::vector<float> distributed_stream_loader_t::get_metrics(size_t i_batch) {
+std::vector<float> distributed_stream_loader_t::get_metrics(size_t i_batch)
+{
     if (!m_metrics.count(i_batch))
         return {};
     return m_metrics[i_batch].get_durations();
 }
 
-void distributed_stream_loader_t::finalize() {
+void distributed_stream_loader_t::finalize()
+{
     std::unique_lock<tl::mutex> lock(request_mutex);
     request_queue.push_back(queue_item_t());
     lock.unlock();
@@ -1024,7 +1208,8 @@ void distributed_stream_loader_t::finalize() {
         DBG("[" << m_provider_id << "] Finalize signal sent...");
 }
 
-distributed_stream_loader_t::~distributed_stream_loader_t() noexcept {
+distributed_stream_loader_t::~distributed_stream_loader_t() noexcept
+{
     m_server_procedure.deregister();
     // Pop the finalize callback. If this destructor was called
     // from the finalization callback, there is nothing to pop
@@ -1038,17 +1223,19 @@ distributed_stream_loader_t::~distributed_stream_loader_t() noexcept {
         cudaStreamDestroy(m_streams[i]);
     }
 #endif
-    delete rehearsal_tensor;
+    delete rehearsal_representatives;
 }
 
 namespace cereal {
-    template<typename A> void save(A& ar, const torch::Tensor& t) {
+    template<typename A> void save(A& ar, const torch::Tensor& t)
+    {
         std::stringstream ss;
         torch::save(t, ss);
         ar(ss.str());
     }
 
-    template<typename A> void load(A& ar, torch::Tensor& t) {
+    template<typename A> void load(A& ar, torch::Tensor& t)
+    {
         std::string s;
         ar(s);
         std::stringstream ss(s);
