@@ -28,7 +28,7 @@ RUN mkdir /opt/spack-environment \
 &&   echo "  - py-pip" \
 &&   echo "  - py-pybind11" \
 &&   echo "  - py-mpi4py" \
-&&   echo "  - py-torch@$PYTORCH_VERSION ~gloo" \
+&&   echo "  - py-torch@$PYTORCH_VERSION" \
 &&   echo "  - py-pytest" \
 &&   echo "  - cmake" \
 &&   echo "  - pkgconfig" \

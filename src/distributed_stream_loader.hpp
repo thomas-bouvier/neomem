@@ -27,15 +27,15 @@ private:
     distributed_stream_loader_t(const engine_loader_t& _engine_loader, Task _task_type,
         unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
         unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
+        unsigned int num_samples_per_activation,
         BufferStrategy _buffer_strategy,
         bool discover_endpoints = false, bool _verbose = false);
     
 public:
-    // This factory method and the private constructor prevent users
-    // from putting an instance of distributed_stream_loader_t on the stack.
     static distributed_stream_loader_t* create(const engine_loader_t& engine_loader, Task task_type,
     unsigned int K, unsigned int N, unsigned int R, unsigned int C, int64_t seed,
     unsigned int num_samples_per_representative, std::vector<long> representative_shape,
+    unsigned int num_samples_per_activation,
     BufferStrategy buffer_strategy, bool discover_endpoints, bool verbose);
     ~distributed_stream_loader_t() noexcept;
     void finalize();
@@ -43,18 +43,17 @@ public:
     void register_endpoints(const std::map<std::string, int>& endpoints);
     void start();
 
-    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets);
-    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets,
-            const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights);
-    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph);
-    void accumulate(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &amp, const torch::Tensor &ph,
-            const torch::Tensor &aug_samples, const torch::Tensor &aug_targets, const torch::Tensor &aug_weights, const torch::Tensor &aug_amp, const torch::Tensor &aug_ph);
-    void accumulate_state(const torch::Tensor &samples, const torch::Tensor &targets, const torch::Tensor &activations);
+    void accumulate(const torch::TensorList& representatives, const torch::Tensor& targets, const torch::TensorList& activations);
+    void accumulate(const torch::TensorList& representatives, const torch::Tensor& targets, const torch::TensorList& activations,
+            const torch::TensorList& aug_representatives, const torch::Tensor& aug_targets, const torch::Tensor& aug_weights,
+            const torch::TensorList& buf_activations, const torch::Tensor& buf_activations_rep);
+
     int wait();
 
-    void use_these_allocated_variables(const torch::Tensor &buf_samples, const torch::Tensor &buf_targets, const torch::Tensor &buf_weights);
-    void use_these_allocated_variables(const torch::Tensor &buf_samples, const torch::Tensor &buf_targets, const torch::Tensor &buf_weights, const torch::Tensor &buf_amp, const torch::Tensor &buf_ph);
-    void use_these_allocated_variables_state(const torch::Tensor &buf_samples, const torch::Tensor &buf_targets, const torch::Tensor &buf_weights, const torch::Tensor &buf_activations, std::vector<long> activation_shape);
+    void use_these_allocated_variables(
+        const torch::TensorList& buf_representatives, const torch::Tensor& buf_targets, const torch::Tensor& buf_weights,
+        const torch::TensorList& buf_activations, const torch::Tensor& buf_ativations_rep
+    );
 
     void enable_augmentation(bool state);
     void measure_performance(bool state);
@@ -64,7 +63,7 @@ public:
 protected:
     uint16_t m_provider_id;
 
-    void init_rehearsal_buffers(bool pin_buffers);
+    void init_rehearsal_buffers(torch::Tensor* storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
     void init_receiving_rdma_buffer();
 
     void copy_last_batch(const queue_item_t &batch);
@@ -79,13 +78,13 @@ protected:
     std::default_random_engine rand_gen;
     unsigned int num_samples_per_representative, num_bytes_per_representative;
     std::vector<long> representative_shape;
-    unsigned int num_bytes_per_activation;
+    unsigned int m_num_samples_per_activation, num_bytes_per_activation;
     std::vector<long> activation_shape;
     BufferStrategy buffer_strategy = NoBuffer;
     bool verbose;
 
-    torch::Tensor* rehearsal_representatives = nullptr;
-    torch::Tensor* rehearsal_activations = nullptr;
+    torch::Tensor* m_rehearsal_representatives = nullptr;
+    torch::Tensor* m_rehearsal_activations = nullptr;
     std::vector<std::pair<size_t, float>> rehearsal_metadata;
     std::vector<int> rehearsal_counts;
     size_t m_rehearsal_size = 0;
@@ -109,21 +108,14 @@ protected:
     bool m_use_allocated_variables = false;
     bool m_store_states = false;
 
-    // todo: these are probably not needed
-    torch::Tensor alloc_aug_samples;
-    torch::Tensor alloc_aug_targets;
-    torch::Tensor alloc_aug_weights;
-    torch::Tensor alloc_aug_amp;
-    torch::Tensor alloc_aug_ph;
-    torch::Tensor alloc_aug_activations;
+    std::shared_ptr<torch::TensorList> m_buf_representatives;
+    std::shared_ptr<torch::Tensor> m_buf_targets, m_buf_weights;
+    std::shared_ptr<torch::TensorList> m_buf_activations;
+    std::shared_ptr<torch::Tensor> m_buf_activations_rep;
 
-    std::vector<torch::Tensor*> client_dest_tensors;
-    torch::Tensor* dest_targets = nullptr;
-    torch::Tensor* dest_weights = nullptr;
-    torch::Tensor* dest_activations = nullptr;
-
-    std::vector<exposed_memory_t> client_mems, server_mems;
-    exposed_memory_t client_activations_mem, server_activations_mem;
+    std::vector<exposed_memory_t> m_client_mems, m_server_mems;
+    std::vector<exposed_memory_t> m_client_activations_mem, m_server_activations_mem;
+    std::vector<exposed_memory_t> m_client_activations_rep_mem, m_server_activations_rep_mem;
 
     std::deque<queue_item_t> request_queue, response_queue;
     tl::mutex request_mutex;
@@ -147,12 +139,17 @@ protected:
     void augment_batch(queue_item_t &batch);
     std::vector<std::pair<int, int>> merge_contiguous_memory(std::vector<std::pair<int, int>>& sections) const;
     void copy_exposed_buffer_to_aug_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections);
+    void create_exposed_memory(std::vector<exposed_memory_t>& memory, size_t nsamples, std::vector<long> sample_shape, exposed_memory_attr attr);
     void populate_rehearsal_buffer(const queue_item_t& batch);
     void update_representative_weights(const queue_item_t& batch, int num_representatives);
 
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
 
-    void get_remote_samples(const tl::request& req, std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int client_bulks_offset, tl::bulk& client_activations_bulk);
+    void get_remote_samples(
+        const tl::request& req,
+        std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int offset,
+        std::vector<tl::bulk>& client_activations_bulk, std::vector<tl::bulk>& client_activations_rep_bulk
+    );
 
     std::vector<std::vector<std::tuple<int, float, size_t, size_t>>> metadata;
 };

@@ -34,12 +34,13 @@ services:
       args:
         MPI_KIND: ONECCL
 
-  # Python 3.11, PyTorch 2.1.2
-  test-cpu-openmpi-py3_11-torch2_1_2:
+  # Python 3.10, PyTorch 2.1.0
+  test-cpu-openmpi-py3_10-torch2_1_0:
     extends: test-cpu-base
     build:
       args:
-        PYTHON_VERSION: "3.11"
+        PYTHON_VERSION: "3.10"
+        PYTORCH_VERSION: "2.1.0"
         MPI_KIND: openmpi
 
   ###############################################

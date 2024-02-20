@@ -3,6 +3,11 @@
 
 #include <torch/extension.h>
 
+struct exposed_memory_attr {
+    bool cuda;
+    tl::bulk_mode bulk_mode;
+};
+
 struct exposed_memory_t {
     std::vector<std::pair<void*, std::size_t>> segments;
     torch::Tensor* buffer = nullptr;

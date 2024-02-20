@@ -19,23 +19,13 @@ PYBIND11_MODULE(neomem, m) {
         // because finalization callbacks are ensuring that providers are freed.
         .def_static("create", &distributed_stream_loader_t::create, py::return_value_policy::reference)
         .def("register_endpoints", &distributed_stream_loader_t::register_endpoints)
-        .def("use_these_allocated_variables", py::overload_cast<const torch::Tensor &, const torch::Tensor &,
-                 const torch::Tensor &>(&distributed_stream_loader_t::use_these_allocated_variables))
-        .def("use_these_allocated_variables", py::overload_cast<const torch::Tensor &, const torch::Tensor &,
-                 const torch::Tensor &, const torch::Tensor &, const torch::Tensor &>(&distributed_stream_loader_t::use_these_allocated_variables))
-        .def("use_these_allocated_variables_state", py::overload_cast<const torch::Tensor &, const torch::Tensor &,
-                 const torch::Tensor &, const torch::Tensor &, std::vector<long>>(&distributed_stream_loader_t::use_these_allocated_variables_state))
+        .def("use_these_allocated_variables", &distributed_stream_loader_t::use_these_allocated_variables)
         .def("enable_augmentation", &distributed_stream_loader_t::enable_augmentation)
         .def("measure_performance", &distributed_stream_loader_t::measure_performance)
         .def("start", &distributed_stream_loader_t::start)
-        .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
-        .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &,
-                 const torch::Tensor &, const torch::Tensor &>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
-        .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &,
-                 const torch::Tensor &, const torch::Tensor &, const torch::Tensor &>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
-        .def("accumulate", py::overload_cast<const torch::Tensor &, const torch::Tensor &, const torch::Tensor &, const torch::Tensor &,
-                 const torch::Tensor &, const torch::Tensor &, const torch::Tensor &, const torch::Tensor &, const torch::Tensor &>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
-        .def("accumulate_state", py::overload_cast<const torch::Tensor &, const torch::Tensor &, const torch::Tensor &>(&distributed_stream_loader_t::accumulate_state), py::call_guard<py::gil_scoped_release>())
+        .def("accumulate", py::overload_cast<const torch::TensorList&, const torch::Tensor&, const torch::TensorList&>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
+        .def("accumulate", py::overload_cast<const torch::TensorList&, const torch::Tensor&, const torch::TensorList&,
+                const torch::TensorList&, const torch::Tensor&, const torch::Tensor&, const torch::TensorList&, const torch::Tensor&>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
         .def("wait", &distributed_stream_loader_t::wait, py::call_guard<py::gil_scoped_release>())
         .def("get_rehearsal_size", &distributed_stream_loader_t::get_rehearsal_size, py::call_guard<py::gil_scoped_release>())
         .def("get_metrics", &distributed_stream_loader_t::get_metrics, py::call_guard<py::gil_scoped_release>())
