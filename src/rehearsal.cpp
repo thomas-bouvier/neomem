@@ -23,9 +23,9 @@ PYBIND11_MODULE(neomem, m) {
         .def("enable_augmentation", &distributed_stream_loader_t::enable_augmentation)
         .def("measure_performance", &distributed_stream_loader_t::measure_performance)
         .def("start", &distributed_stream_loader_t::start)
-        .def("accumulate", py::overload_cast<const torch::TensorList&, const torch::Tensor&, const torch::TensorList&>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
-        .def("accumulate", py::overload_cast<const torch::TensorList&, const torch::Tensor&, const torch::TensorList&,
-                const torch::TensorList&, const torch::Tensor&, const torch::Tensor&, const torch::TensorList&, const torch::Tensor&>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
+        .def("accumulate", py::overload_cast<const std::vector<torch::Tensor>&, const torch::Tensor&, const std::vector<torch::Tensor>&>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
+        .def("accumulate", py::overload_cast<const std::vector<torch::Tensor>&, const torch::Tensor&, const std::vector<torch::Tensor>&,
+                const std::vector<torch::Tensor>&, const torch::Tensor&, const torch::Tensor&, const std::vector<torch::Tensor>&, const torch::Tensor&>(&distributed_stream_loader_t::accumulate), py::call_guard<py::gil_scoped_release>())
         .def("wait", &distributed_stream_loader_t::wait, py::call_guard<py::gil_scoped_release>())
         .def("get_rehearsal_size", &distributed_stream_loader_t::get_rehearsal_size, py::call_guard<py::gil_scoped_release>())
         .def("get_metrics", &distributed_stream_loader_t::get_metrics, py::call_guard<py::gil_scoped_release>())

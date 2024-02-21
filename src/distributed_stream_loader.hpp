@@ -43,16 +43,16 @@ public:
     void register_endpoints(const std::map<std::string, int>& endpoints);
     void start();
 
-    void accumulate(const torch::TensorList& representatives, const torch::Tensor& targets, const torch::TensorList& activations);
-    void accumulate(const torch::TensorList& representatives, const torch::Tensor& targets, const torch::TensorList& activations,
-            const torch::TensorList& aug_representatives, const torch::Tensor& aug_targets, const torch::Tensor& aug_weights,
-            const torch::TensorList& buf_activations, const torch::Tensor& buf_activations_rep);
+    void accumulate(const std::vector<torch::Tensor>& representatives, const torch::Tensor& targets, const std::vector<torch::Tensor>& activations);
+    void accumulate(const std::vector<torch::Tensor>& representatives, const torch::Tensor& targets, const std::vector<torch::Tensor>& activations,
+            const std::vector<torch::Tensor>& aug_representatives, const torch::Tensor& aug_targets, const torch::Tensor& aug_weights,
+            const std::vector<torch::Tensor>& buf_activations, const torch::Tensor& buf_activations_rep);
 
     int wait();
 
     void use_these_allocated_variables(
-        const torch::TensorList& buf_representatives, const torch::Tensor& buf_targets, const torch::Tensor& buf_weights,
-        const torch::TensorList& buf_activations, const torch::Tensor& buf_ativations_rep
+        const std::vector<torch::Tensor>& buf_representatives, const torch::Tensor& buf_targets, const torch::Tensor& buf_weights,
+        const std::vector<torch::Tensor>& buf_activations, const torch::Tensor& buf_ativations_rep
     );
 
     void enable_augmentation(bool state);
@@ -63,7 +63,7 @@ public:
 protected:
     uint16_t m_provider_id;
 
-    void init_rehearsal_buffers(torch::Tensor* storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
+    void init_rehearsal_buffers(torch::Tensor** storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
     void init_receiving_rdma_buffer();
 
     void copy_last_batch(const queue_item_t &batch);
@@ -108,9 +108,9 @@ protected:
     bool m_use_allocated_variables = false;
     bool m_store_states = false;
 
-    std::shared_ptr<torch::TensorList> m_buf_representatives;
+    std::shared_ptr<std::vector<torch::Tensor>> m_buf_representatives;
     std::shared_ptr<torch::Tensor> m_buf_targets, m_buf_weights;
-    std::shared_ptr<torch::TensorList> m_buf_activations;
+    std::shared_ptr<std::vector<torch::Tensor>> m_buf_activations;
     std::shared_ptr<torch::Tensor> m_buf_activations_rep;
 
     std::vector<exposed_memory_t> m_client_mems, m_server_mems;

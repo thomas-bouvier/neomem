@@ -6,15 +6,15 @@
 #include <torch/extension.h>
 
 struct queue_item_t {
-    torch::TensorList m_representatives;
+    std::vector<torch::Tensor> m_representatives;
     torch::Tensor m_targets, m_weights;
-    torch::TensorList m_activations;
+    std::vector<torch::Tensor> m_activations;
 
     // Flyweight objects.
-    torch::TensorList m_aug_representatives;
+    std::vector<torch::Tensor> m_aug_representatives;
     torch::Tensor m_aug_targets, m_aug_weights;
 
-    torch::TensorList m_buf_activations;
+    std::vector<torch::Tensor> m_buf_activations;
     torch::Tensor m_buf_activations_rep;
 
     int size = 0;
@@ -24,7 +24,7 @@ struct queue_item_t {
     /**
      * 
      */
-    queue_item_t(const torch::TensorList& representatives, const torch::Tensor& targets, const torch::TensorList &activations) :
+    queue_item_t(const std::vector<torch::Tensor>& representatives, const torch::Tensor& targets, const std::vector<torch::Tensor>& activations) :
         m_representatives(representatives), m_targets(targets), m_activations(activations) {
             ASSERT(targets.dim() == 1);
             ASSERT(representatives[0].sizes()[0] == targets.sizes()[0]);
@@ -37,8 +37,8 @@ struct queue_item_t {
             m_weights = torch::ones({size}, torch::TensorOptions().dtype(torch::kFloat32).device(representatives[0].device()));
     }
 
-    queue_item_t(const torch::TensorList& representatives, const torch::Tensor& targets, const torch::TensorList& activations,
-            const torch::TensorList& aug_representatives, const torch::Tensor& aug_targets, const torch::Tensor& aug_weights, const torch::TensorList& buf_activations, const torch::Tensor& buf_activations_rep) :
+    queue_item_t(const std::vector<torch::Tensor>& representatives, const torch::Tensor& targets, const std::vector<torch::Tensor>& activations,
+            const std::vector<torch::Tensor>& aug_representatives, const torch::Tensor& aug_targets, const torch::Tensor& aug_weights, const std::vector<torch::Tensor>& buf_activations, const torch::Tensor& buf_activations_rep) :
         m_representatives(representatives), m_targets(targets), m_activations(activations),
         m_aug_representatives(aug_representatives), m_aug_targets(aug_targets), m_aug_weights(aug_weights), m_buf_activations(buf_activations), m_buf_activations_rep(buf_activations_rep) {
             ASSERT(targets.dim() == 1);

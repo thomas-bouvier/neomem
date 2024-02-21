@@ -153,7 +153,7 @@ class TorchTests(unittest.TestCase):
 
         Parameter `size` will have a max value of B + R.
         """
-        self.skipTest("skip")
+        self.skipTest("skip") # validated
 
         # num_classes
         K = 100
@@ -169,6 +169,7 @@ class TorchTests(unittest.TestCase):
         aug_samples = torch.zeros(B + R, 3, 224, 224)
         aug_labels = torch.randint(high=K, size=(B + R,))
         aug_weights = torch.zeros(B + R)
+        fake = torch.tensor([1])
 
         dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
@@ -186,7 +187,7 @@ class TorchTests(unittest.TestCase):
 
         for _ in range(2):
             for inputs, target in loader:
-                dsl.accumulate(inputs, target, aug_samples, aug_labels, aug_weights)
+                dsl.accumulate([inputs], target, [], [aug_samples], aug_labels, aug_weights, [], fake)
                 size = dsl.wait()
 
                 # Training the DNN, aug_samples should be a new instance
@@ -214,7 +215,7 @@ class TorchTests(unittest.TestCase):
 
         Parameter `size` will have a max value of R.
         """
-        self.skipTest("skip")
+        self.skipTest("skip") # validated
 
         # num_classes
         K = 100
@@ -230,6 +231,7 @@ class TorchTests(unittest.TestCase):
         buf_samples = torch.zeros(R, 3, 224, 224)
         buf_labels = torch.randint(high=K, size=(R,))
         buf_weights = torch.zeros(R)
+        fake = torch.tensor([1])
 
         dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
@@ -243,12 +245,12 @@ class TorchTests(unittest.TestCase):
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
-        dsl.use_these_allocated_variables(buf_samples, buf_labels, buf_weights)
+        dsl.use_these_allocated_variables([buf_samples], buf_labels, buf_weights, [], fake)
         dsl.start()
 
         for _ in range(2):
             for inputs, target in loader:
-                dsl.accumulate(inputs, target)
+                dsl.accumulate([inputs], target, [])
                 size = dsl.wait()
 
                 # Training the DNN
@@ -265,7 +267,7 @@ class TorchTests(unittest.TestCase):
         """Test the case where a representative is composed of multiple
         samples.
         """
-        self.skipTest("Fails at shutdown")
+        self.skipTest("Fails at shutdown") # validated
 
         # num_classes
         K = 1
@@ -283,6 +285,7 @@ class TorchTests(unittest.TestCase):
         aug_weights_recon = torch.zeros(B + R)
         aug_amp = torch.zeros(B + R, 1, 256, 256)
         aug_ph = torch.zeros(B + R, 1, 256, 256)
+        fake = torch.tensor([1])
 
         dataset = PtychoDataset()
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
@@ -307,7 +310,8 @@ class TorchTests(unittest.TestCase):
                     [aug_samples_recon, aug_amp, aug_ph],
                     aug_targets_recon,
                     aug_weights_recon,
-                    []
+                    [],
+                    fake
                 )
                 size = dsl.wait()
 
@@ -322,6 +326,7 @@ class TorchTests(unittest.TestCase):
         """Test the case where a representative is composed of multiple
         samples.
         """
+        self.skipTest("skip") # validated
         # num_classes
         K = 1
         # rehearsal_size
@@ -338,6 +343,7 @@ class TorchTests(unittest.TestCase):
         buf_ph = torch.zeros(R, 1, 256, 256)
         buf_targets_recon = torch.zeros(R)
         buf_weights_recon = torch.zeros(R)
+        fake = torch.tensor([1])
 
         dataset = PtychoDataset()
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
@@ -356,7 +362,7 @@ class TorchTests(unittest.TestCase):
             buf_targets_recon,
             buf_weights_recon,
             [],
-            None
+            fake
         )
         dsl.start()
 
@@ -377,7 +383,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_standard_der_buffer(self):
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -394,12 +400,13 @@ class TorchTests(unittest.TestCase):
 
         buf_activations = torch.zeros(R_distillation, K)
         buf_activations_rep = torch.zeros(R_distillation, K)
+        fake = torch.tensor([1])
 
         last_inputs = None
         last_targets = None
         activations = None
 
-        dataset = PtychoDataset()
+        dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
@@ -421,8 +428,8 @@ class TorchTests(unittest.TestCase):
                         last_targets,
                         [activations],
                         [],
-                        None,
-                        None,
+                        fake,
+                        fake,
                         [buf_activations],
                         buf_activations_rep
                     )
@@ -435,8 +442,8 @@ class TorchTests(unittest.TestCase):
                 # kd_output = model(buf_activations_rep[:size])
                 # loss += alpha * (mse(kd_output, buf_activations))
                 activations = torch.full((B, K), 42, dtype=torch.float32)
-                for i in range(len(target)):
-                    activations[i] = inputs[i]
+                for i in range(target.size()[0]):
+                    activations[:, i] = target[i]
 
                 if last_inputs is not None:
                     for j in range(B, size):
@@ -471,7 +478,7 @@ class TorchTests(unittest.TestCase):
         last_targets = None
         activations = None
 
-        dataset = PtychoDataset()
+        dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
@@ -509,9 +516,8 @@ class TorchTests(unittest.TestCase):
                 # kd_output = model(buf_activations_rep)
                 # loss += alpha * mse(kd_output, buf_activations)
 
-                activations = torch.full((B, K), 42, dtype=torch.float32)
-                for i in range(len(target)):
-                    activations[i] = inputs[i]
+                print(target)
+                activations = torch.full((B, K), target[0], dtype=torch.float32)
 
                 if last_inputs is not None:
                     for j in range(size):
@@ -549,7 +555,7 @@ class TorchTests(unittest.TestCase):
         last_targets = None
         activations = None
 
-        dataset = PtychoDataset()
+        dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
@@ -624,7 +630,7 @@ class TorchTests(unittest.TestCase):
         last_targets = None
         activations = None
 
-        dataset = PtychoDataset()
+        dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
 
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)

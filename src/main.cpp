@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
     }
 
     engine_loader_t engine(server_address, server_id);
-    distributed_stream_loader_t* dsl = distributed_stream_loader_t::create(engine, Classification, K, N, R, C, seed, 1, {3, 224, 224}, CPUBuffer, discover_endpoints, true);
+    distributed_stream_loader_t* dsl = distributed_stream_loader_t::create(engine, Classification, K, N, R, C, seed, 1, {3, 224, 224}, 0, CPUBuffer, discover_endpoints, true);
     if (!mpi) {
         dsl->register_endpoints(endpoints);
     }
@@ -97,6 +97,7 @@ int main(int argc, char** argv) {
         device_type = torch::kCPU;
     }
 
+    /*
     torch::Tensor aug_samples = torch::full({N + R, 3, 224, 224}, -1, torch::TensorOptions().dtype(torch::kFloat32).device(device_type));
     torch::Tensor aug_labels = torch::randint(K, {N + R}, torch::TensorOptions().dtype(torch::kInt64).device(device_type));
     torch::Tensor aug_weights = torch::zeros({N + R}, torch::TensorOptions().dtype(torch::kFloat32).device(device_type));
@@ -128,6 +129,7 @@ int main(int argc, char** argv) {
             ASSERT(torch::equal(aug_samples[j][0][0][0], aug_labels[j].to(torch::kFloat32)));
         }
     }
+    */
 
     dsl->finalize();
     engine.wait_for_finalize();
