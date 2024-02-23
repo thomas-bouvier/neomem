@@ -25,17 +25,17 @@ enum BufferStrategy { NoBuffer, CPUBuffer, CUDABuffer };
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
 private:
     distributed_stream_loader_t(const engine_loader_t& _engine_loader, Task _task_type,
-        unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
-        unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
-        unsigned int num_samples_per_activation,
-        BufferStrategy _buffer_strategy,
-        bool discover_endpoints = false, bool _verbose = false);
+        unsigned int K, unsigned int N, unsigned int R, unsigned int C, int64_t seed,
+        unsigned int num_samples_per_representative, std::vector<long> representative_shape,
+        unsigned int num_samples_per_activation, std::vector<long> activation_shape,
+        BufferStrategy buffer_strategy,
+        bool discover_endpoints = false, bool verbose = false);
     
 public:
     static distributed_stream_loader_t* create(const engine_loader_t& engine_loader, Task task_type,
     unsigned int K, unsigned int N, unsigned int R, unsigned int C, int64_t seed,
     unsigned int num_samples_per_representative, std::vector<long> representative_shape,
-    unsigned int num_samples_per_activation,
+    unsigned int num_samples_per_activation, std::vector<long> activation_shape,
     BufferStrategy buffer_strategy, bool discover_endpoints, bool verbose);
     ~distributed_stream_loader_t() noexcept;
     void finalize();
@@ -64,7 +64,7 @@ protected:
     uint16_t m_provider_id;
 
     void init_rehearsal_buffers(torch::Tensor** storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
-    void init_receiving_rdma_buffer();
+    void init_receiving_rdma_buffer(std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nsamples, std::vector<long> sample_shape);
 
     void copy_last_batch(const queue_item_t &batch);
     std::size_t dispatch_rpcs(std::vector<tl::async_response> &responses);
@@ -76,10 +76,10 @@ protected:
     Task task_type;
     unsigned int K, N, R, C;
     std::default_random_engine rand_gen;
-    unsigned int num_samples_per_representative, num_bytes_per_representative;
+    unsigned int m_num_samples_per_representative, m_num_bytes_per_representative;
     std::vector<long> representative_shape;
-    unsigned int m_num_samples_per_activation, num_bytes_per_activation;
-    std::vector<long> activation_shape;
+    unsigned int m_num_samples_per_activation, m_num_bytes_per_activation;
+    std::vector<long> m_activation_shape;
     BufferStrategy buffer_strategy = NoBuffer;
     bool verbose;
 
@@ -106,6 +106,7 @@ protected:
     bool m_augmentation_enabled = false;
     bool m_measure_performance = false;
     bool m_use_allocated_variables = false;
+    bool m_augment_batches = false;
     bool m_store_states = false;
 
     std::shared_ptr<std::vector<torch::Tensor>> m_buf_representatives;

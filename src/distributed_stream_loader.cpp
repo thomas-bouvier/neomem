@@ -52,16 +52,17 @@ void checkLast(const char* const file, const int line) {
 distributed_stream_loader_t::distributed_stream_loader_t(
         const engine_loader_t& _engine_loader, Task _task_type,
         unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
-        unsigned int _num_samples_per_representative, std::vector<long> _representative_shape,
-        unsigned int num_samples_per_activation,
+        unsigned int num_samples_per_representative, std::vector<long> _representative_shape,
+        unsigned int num_samples_per_activation, std::vector<long> activation_shape,
         BufferStrategy _buffer_strategy, bool discover_endpoints, bool _verbose)
               : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id()),
                 m_provider_id(_engine_loader.get_id()),
                 task_type(_task_type), K(_K), N(_N), R(_R), C(_C), rand_gen(seed),
-                num_samples_per_representative(_num_samples_per_representative),
-                representative_shape(_representative_shape), m_num_samples_per_activation(num_samples_per_activation), buffer_strategy(_buffer_strategy), verbose(_verbose)
+                m_num_samples_per_representative(num_samples_per_representative), representative_shape(_representative_shape),
+                m_num_samples_per_activation(num_samples_per_activation), m_activation_shape(activation_shape),
+                buffer_strategy(_buffer_strategy), verbose(_verbose)
 {
-    num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
+    m_num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
 
     m_server_procedure = define("get_samples", &distributed_stream_loader_t::get_remote_samples);
     // Register the remote procedure
@@ -117,7 +118,42 @@ distributed_stream_loader_t::distributed_stream_loader_t(
         representative_shape,
         torch::cuda::is_available()
     );
-    init_receiving_rdma_buffer();
+
+    // Initialize 
+    if (m_augment_batches) {
+        init_receiving_rdma_buffer(
+            m_server_mems,
+            m_client_mems,
+            num_samples_per_representative,
+            representative_shape
+        );
+    }
+
+    if (m_num_samples_per_activation > 0) {
+        m_store_states = true;
+        m_num_bytes_per_activation = 4 * std::accumulate(activation_shape.begin(), activation_shape.end(), 1, std::multiplies<int>());
+
+        init_rehearsal_buffers(
+            &m_rehearsal_activations,
+            m_num_samples_per_activation,
+            activation_shape,
+            torch::cuda::is_available()
+        );
+
+        // Initializing bulks
+        init_receiving_rdma_buffer(
+            m_server_activations_mem,
+            m_client_activations_mem,
+            m_num_samples_per_activation,
+            activation_shape
+        );
+        init_receiving_rdma_buffer(
+            m_server_activations_rep_mem,
+            m_client_activations_rep_mem,
+            1,
+            representative_shape
+        );
+    }
 }
 
 /**
@@ -127,11 +163,14 @@ distributed_stream_loader_t::distributed_stream_loader_t(
 /* static */ distributed_stream_loader_t* distributed_stream_loader_t::create(const engine_loader_t& engine_loader, Task task_type,
     unsigned int K, unsigned int N, unsigned int R, unsigned int C, int64_t seed,
     unsigned int num_samples_per_representative, std::vector<long> representative_shape,
-    unsigned int num_samples_per_activation,
+    unsigned int num_samples_per_activation, std::vector<long> activation_shape,
     BufferStrategy buffer_strategy,
     bool discover_endpoints, bool verbose) {
-    return new distributed_stream_loader_t(engine_loader, task_type, K, N, R, C, seed,
-        num_samples_per_representative, representative_shape, num_samples_per_activation, buffer_strategy, discover_endpoints, verbose);
+    return new distributed_stream_loader_t(
+        engine_loader, task_type, K, N, R, C, seed,
+        num_samples_per_representative, representative_shape, num_samples_per_activation, activation_shape,
+        buffer_strategy, discover_endpoints, verbose
+    );
 }
 
 /**
@@ -189,7 +228,8 @@ void distributed_stream_loader_t::init_rehearsal_buffers(
  * - the 'allocated policy'
  * - the buffer strategy, NoBuffer, CPUBuffer or CUDABuffer
  */
-void distributed_stream_loader_t::init_receiving_rdma_buffer()
+void distributed_stream_loader_t::init_receiving_rdma_buffer(
+    std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nsamples, std::vector<long> sample_shape)
 {
     nvtx3::scoped_range nvtx{"init_receiving_rdma_buffer"};
 
@@ -210,7 +250,7 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer()
     struct exposed_memory_attr server_attr;
     memset(&server_attr, 0, sizeof(server_attr));
     server_attr.bulk_mode = tl::bulk_mode::read_only;
-    create_exposed_memory(m_server_mems, num_samples_per_representative, representative_shape, server_attr);
+    create_exposed_memory(server_mems, nsamples, sample_shape, server_attr);
 
     if (verbose)
         DBG("[" << m_provider_id << "] Server mems initialized!");
@@ -220,7 +260,7 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer()
     memset(&client_attr, 0, sizeof(client_attr));
     client_attr.cuda = buffer_strategy == CUDABuffer;
     client_attr.bulk_mode = tl::bulk_mode::write_only;
-    create_exposed_memory(m_client_mems, num_samples_per_representative, representative_shape, client_attr);
+    create_exposed_memory(client_mems, nsamples, sample_shape, client_attr);
 
     if (verbose)
         DBG("[" << m_provider_id << "] Client mems initialized!");
@@ -311,17 +351,19 @@ void distributed_stream_loader_t::async_process()
         // Initialization of the augmented result, which changes at every
         // iteration with implementation `standard`
         if (!m_use_allocated_variables) {
-            m_buf_representatives = std::make_shared<std::vector<torch::Tensor>>(batch.m_aug_representatives);
-            m_buf_targets = std::make_shared<torch::Tensor>(batch.m_aug_targets);
-            m_buf_weights = std::make_shared<torch::Tensor>(batch.m_aug_weights);
+            if (m_augment_batches) {
+                m_buf_representatives = std::make_shared<std::vector<torch::Tensor>>(batch.m_aug_representatives);
+                m_buf_targets = std::make_shared<torch::Tensor>(batch.m_aug_targets);
+                m_buf_weights = std::make_shared<torch::Tensor>(batch.m_aug_weights);
+
+                batch.m_augmentation_mark = batch.get_size();
+                copy_last_batch(batch);
+            }
 
             if (m_store_states) { 
                 m_buf_activations = std::make_shared<std::vector<torch::Tensor>>(batch.m_buf_activations);
                 m_buf_activations_rep = std::make_shared<torch::Tensor>(batch.m_buf_activations_rep);
             }
-
-            batch.m_augmentation_mark = batch.get_size();
-            copy_last_batch(batch);
         }
 
         if (m_augmentation_enabled) {
@@ -372,7 +414,7 @@ void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch)
         CHECK_CUDA_ERROR(cudaMemcpyAsync(
             (char *) batch.m_aug_representatives[i].data_ptr(),
             batch.m_representatives[i].data_ptr(),
-            batch.get_size() * num_bytes_per_representative,
+            batch.get_size() * m_num_bytes_per_representative,
             cudaMemcpyDefault,
             m_streams[0]
         ));
@@ -396,7 +438,7 @@ void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch)
         std::memcpy(
             (char *) batch.m_aug_representatives[i].data_ptr(),
             batch.m_representatives[i].data_ptr(),
-            batch.get_size() * num_bytes_per_representative
+            batch.get_size() * m_num_bytes_per_representative
         );
     }
     std::memcpy(
@@ -451,9 +493,13 @@ std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_res
 
     std::vector<tl::bulk> client_bulks;
     std::vector<tl::bulk> client_activations_bulks, client_activations_rep_bulks;
-    for (size_t i = 0; i < m_client_mems.size(); i++) {
-        client_bulks.push_back(m_client_mems[i].bulk);
+
+    if (m_augment_batches) {
+        for (size_t i = 0; i < m_client_mems.size(); i++) {
+            client_bulks.push_back(m_client_mems[i].bulk);
+        }
     }
+
     if (m_store_states) {
         for (size_t i = 0; i < m_client_activations_mem.size(); i++) {
             client_activations_bulks.push_back(m_client_activations_mem[i].bulk);
@@ -515,28 +561,30 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
                 memory_sections.emplace_back(*offset, *num_targets);
             }
 
-            for (size_t j = 0; j < *num_targets; j++) {
+            if (m_augment_batches) {
+                for (size_t j = 0; j < *num_targets; j++) {
 #ifndef WITHOUT_CUDA
-                CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                    // no * batch.element_size() as type is given
-                    m_buf_targets->data_ptr<long int>() + batch.aug_size,
-                    label,
-                    sizeof(*label),
-                    cudaMemcpyDefault,
-                    m_streams[0]
-                ));
-                CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                    m_buf_weights->data_ptr<float>() + batch.aug_size,
-                    weight,
-                    sizeof(*weight),
-                    cudaMemcpyDefault,
-                    m_streams[0]
-                ));
+                    CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                        // no * batch.element_size() as type is given
+                        m_buf_targets->data_ptr<long int>() + batch.aug_size,
+                        label,
+                        sizeof(*label),
+                        cudaMemcpyDefault,
+                        m_streams[0]
+                    ));
+                    CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                        m_buf_weights->data_ptr<float>() + batch.aug_size,
+                        weight,
+                        sizeof(*weight),
+                        cudaMemcpyDefault,
+                        m_streams[0]
+                    ));
 #else
-                m_buf_targets->index_put_({batch.aug_size}, *label);
-                m_buf_weights->index_put_({batch.aug_size}, *weight);
+                    m_buf_targets->index_put_({batch.aug_size}, *label);
+                    m_buf_weights->index_put_({batch.aug_size}, *weight);
 #endif
-                batch.aug_size++;
+                    batch.aug_size++;
+                }
             }
         }
     }
@@ -598,37 +646,40 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_i
         // First element is the offset in the client exposed memory, second
         // element is the chunk size in bytes.
 #ifndef WITHOUT_CUDA
-        for (size_t r = 0; r < (*m_buf_representatives).size(); r++) {
+        for (size_t r = 0; r < m_buf_representatives->size(); r++) {
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                (char *) (*m_buf_representatives)[r].data_ptr() + (batch.m_augmentation_mark + cumulated_offset) * num_bytes_per_representative,
-                (char *) m_client_mems[r].buffer->data_ptr() + pair.first * num_bytes_per_representative,
-                pair.second * num_bytes_per_representative,
+                (char *) m_buf_representatives->at(r).data_ptr() + (batch.m_augmentation_mark + cumulated_offset) * m_num_bytes_per_representative,
+                (char *) m_client_mems[r].buffer->data_ptr() + pair.first * m_num_bytes_per_representative,
+                pair.second * m_num_bytes_per_representative,
                 cudaMemcpyDefault,
                 m_streams[0]
             ));
         }
 #else
-        for (size_t r = 0; r < m_buf_representatives->size(); r++) {
-            std::memcpy(
-                (char *) (*m_buf_representatives)[r].data_ptr() + (batch.m_augmentation_mark + cumulated_offset) * num_bytes_per_representative,
-                (char *) m_client_mems[r].buffer->data_ptr() + pair.first * num_bytes_per_representative,
-                pair.second * num_bytes_per_representative
-            );
+        if (m_augment_batches) {
+            for (size_t r = 0; r < m_buf_representatives->size(); r++) {
+                std::memcpy(
+                    (char *) m_buf_representatives->at(r).data_ptr() + (batch.m_augmentation_mark + cumulated_offset) * m_num_bytes_per_representative,
+                    (char *) m_client_mems[r].buffer->data_ptr() + pair.first * m_num_bytes_per_representative,
+                    pair.second * m_num_bytes_per_representative
+                );
+            }
         }
+
         if (m_store_states) {
             // Copying activations
             for (size_t r = 0; r < m_buf_activations->size(); r++) {
                 std::memcpy(
-                    (char *) (*m_buf_activations)[r].data_ptr() + cumulated_offset * num_bytes_per_activation,
-                    (char *) m_client_activations_mem[r].buffer->data_ptr() + pair.first * num_bytes_per_activation,
-                    pair.second * num_bytes_per_activation
+                    (char *) m_buf_activations->at(r).data_ptr() + cumulated_offset * m_num_bytes_per_activation,
+                    (char *) m_client_activations_mem[r].buffer->data_ptr() + pair.first * m_num_bytes_per_activation,
+                    pair.second * m_num_bytes_per_activation
                 );
             }
             // Copying corresponding training representative
             std::memcpy(
-                (char *) (*m_buf_activations_rep)[0].data_ptr() + cumulated_offset * num_bytes_per_representative,
-                (char *) m_client_activations_rep_mem[0].buffer->data_ptr() + pair.first * num_bytes_per_representative,
-                pair.second * num_bytes_per_representative
+                (char *) m_buf_activations_rep->data_ptr() + cumulated_offset * m_num_bytes_per_representative,
+                (char *) m_client_activations_rep_mem[0].buffer->data_ptr() + pair.first * m_num_bytes_per_representative,
+                pair.second * m_num_bytes_per_representative
             );
         }
 #endif
@@ -703,18 +754,18 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 #ifndef WITHOUT_CUDA
         for (size_t k = 0; k < batch.m_representatives.size(); k++) {
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                (char *) m_rehearsal_representatives->data_ptr() + num_bytes_per_representative * (batch.m_representatives.size() * j + k),
-                (char *) batch.m_representatives[k].data_ptr() + num_bytes_per_representative * i,
-                num_bytes_per_representative,
+                (char *) m_rehearsal_representatives->data_ptr() + m_num_bytes_per_representative * (batch.m_representatives.size() * j + k),
+                (char *) batch.m_representatives[k].data_ptr() + m_num_bytes_per_representative * i,
+                m_num_bytes_per_representative,
                 cudaMemcpyDefault,
                 m_streams[1]
             ));
         }
         if (m_store_states) {
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                (char *) m_rehearsal_activations->data_ptr() + num_bytes_per_activation * j,
-                (char *) batch.m_activations[0].data_ptr() + num_bytes_per_activation * i,
-                num_bytes_per_activation,
+                (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * j,
+                (char *) batch.m_activations[0].data_ptr() + m_num_bytes_per_activation * i,
+                m_num_bytes_per_activation,
                 cudaMemcpyDefault,
                 m_streams[1]
             ));
@@ -722,17 +773,17 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
 #else
         for (size_t k = 0; k < batch.m_representatives.size(); k++) {
             std::memcpy(
-                (char *) m_rehearsal_representatives->data_ptr() + num_bytes_per_representative * (batch.m_representatives.size() * j + k),
-                (char *) batch.m_representatives[k].data_ptr() + num_bytes_per_representative * i,
-                num_bytes_per_representative
+                (char *) m_rehearsal_representatives->data_ptr() + m_num_bytes_per_representative * (batch.m_representatives.size() * j + k),
+                (char *) batch.m_representatives[k].data_ptr() + m_num_bytes_per_representative * i,
+                m_num_bytes_per_representative
             );
         }
         if (m_store_states) {
             for (size_t k = 0; k < batch.m_activations.size(); k++) {
                 std::memcpy(
-                    (char *) m_rehearsal_activations->data_ptr() + num_bytes_per_activation * (batch.m_activations.size() * j + k),
-                    (char *) batch.m_activations[k].data_ptr() + num_bytes_per_activation * i,
-                    num_bytes_per_activation
+                    (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * (batch.m_activations.size() * j + k),
+                    (char *) batch.m_activations[k].data_ptr() + m_num_bytes_per_activation * i,
+                    m_num_bytes_per_activation
                 );
             }
         }
@@ -776,7 +827,7 @@ void distributed_stream_loader_t::update_representative_weights(const queue_item
 void distributed_stream_loader_t::get_remote_samples(
         const tl::request& req,
         std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int offset, 
-        std::vector<tl::bulk>& client_activations_bulk, std::vector<tl::bulk>& client_activations_rep_bulk)
+        std::vector<tl::bulk>& client_activations_bulks, std::vector<tl::bulk>& client_activations_rep_bulks)
 {
     nvtx3::scoped_range nvtx{"get_remote_samples"};
 
@@ -828,9 +879,17 @@ void distributed_stream_loader_t::get_remote_samples(
     }
 
     if (verbose && c > 0) {
-        std::cout << "[" << m_provider_id << "] Sending " << c << "/" << indices.size()  << " representatives from "
-            << samples.size() << " different classes to remote node (endpoint: "
-            << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_bulks.size() << " client bulks)" << std::endl;
+        if (m_augment_batches) {
+            std::cout << "[" << m_provider_id << "] Sending " << c << "/" << indices.size()  << " representatives from "
+                << samples.size() << " different classes to remote node (endpoint: "
+                << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_bulks.size() << " client bulks)" << std::endl;
+        }
+
+        if (m_store_states) {
+            std::cout << "[" << m_provider_id << "] Sending " << c << "/" << indices.size()  << " activations and associated representatives from "
+                << samples.size() << " different classes to remote node (endpoint: "
+                << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_activations_bulks.size() << " client activation bulks)" << std::endl;
+        }
     }
 
     /**
@@ -863,25 +922,36 @@ void distributed_stream_loader_t::get_remote_samples(
 
         for (size_t i = 0; i < reprs_indices.size(); i++) {
 #ifndef WITHOUT_CUDA
-            for (size_t r = 0; r < num_samples_per_representative; r++) {
-                const int index = num_samples_per_representative * reprs_indices[i] + r;
-                CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                    (char *) server_mems[r].buffer->data_ptr() + num_bytes_per_representative * o,
-                    m_rehearsal_representatives->index({index}).data_ptr(),
-                    num_bytes_per_representative,
-                    cudaMemcpyDefault,
-                    m_streams[2]
-                ));
+            if (m_augment_batches) {
+                for (size_t r = 0; r < m_num_samples_per_representative; r++) {
+                    const int index = m_num_samples_per_representative * reprs_indices[i] + r;
+                    CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                        (char *) server_mems[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
+                        m_rehearsal_representatives->index({index}).data_ptr(),
+                        m_num_bytes_per_representative,
+                        cudaMemcpyDefault,
+                        m_streams[2]
+                    ));
+                }
+            }
+
+            if (m_store_states) {
+                // todo
             }
 #else
-            for (size_t r = 0; r < num_samples_per_representative; r++) {
-                const int index = num_samples_per_representative * reprs_indices[i] + r;
-                m_server_mems[r].buffer->index_put_({o}, m_rehearsal_representatives->index({index}));
+            if (m_augment_batches) {
+                for (size_t r = 0; r < m_num_samples_per_representative; r++) {
+                    const int index = m_num_samples_per_representative * reprs_indices[i] + r;
+                    m_server_mems[r].buffer->index_put_({o}, m_rehearsal_representatives->index({index}));
+                }
             }
+
             if (m_store_states) {
-                const int index = reprs_indices[i];
-                m_server_activations_mem[0].buffer->index_put_({o}, m_rehearsal_activations->index({index}));
-                m_server_activations_rep_mem[0].buffer->index_put_({o}, m_rehearsal_representatives->index({index}));
+                for (size_t r = 0; r < m_num_samples_per_activation; r++) {
+                    const int index = m_num_samples_per_activation * reprs_indices[i] + r;
+                    m_server_activations_mem[r].buffer->index_put_({o}, m_rehearsal_activations->index({index}));
+                }
+                m_server_activations_rep_mem[0].buffer->index_put_({o}, m_rehearsal_representatives->index({reprs_indices[i]}));
             }
 #endif
             o++;
@@ -896,19 +966,23 @@ void distributed_stream_loader_t::get_remote_samples(
         cudaStreamSynchronize(m_streams[2]);
 #endif
 
-        auto num_bytes_representatives = c * num_bytes_per_representative;
-        for (size_t r = 0; r < num_samples_per_representative; r++) {
-            m_server_mems[r].bulk(0, num_bytes_representatives)
-                >> client_bulks[r](offset * num_bytes_per_representative, num_bytes_representatives).on(req.get_endpoint());
+        auto num_bytes_representatives = c * m_num_bytes_per_representative;
+
+        if (m_augment_batches) {
+            for (size_t r = 0; r < m_num_samples_per_representative; r++) {
+                m_server_mems[r].bulk(0, num_bytes_representatives)
+                    >> client_bulks[r](offset * m_num_bytes_per_representative, num_bytes_representatives).on(req.get_endpoint());
+            }
         }
+
         if (m_store_states) {
-            auto num_bytes_activations = c * num_bytes_per_activation;
+            auto num_bytes_activations = c * m_num_bytes_per_activation;
             for (size_t r = 0; r < m_num_samples_per_activation; r++) {
                 m_server_activations_mem[r].bulk(0, num_bytes_activations)
-                    >> client_activations_bulk[r](offset * num_bytes_per_activation, num_bytes_activations).on(req.get_endpoint());
+                    >> client_activations_bulks[r](offset * m_num_bytes_per_activation, num_bytes_activations).on(req.get_endpoint());
             }
-            m_server_activations_rep_mem[0].bulk(0, num_bytes_per_representative)
-                >> client_activations_rep_bulk[0](offset * num_bytes_per_representative, num_bytes_per_representative).on(req.get_endpoint());
+            m_server_activations_rep_mem[0].bulk(0, num_bytes_representatives)
+                >> client_activations_rep_bulks[0](offset * m_num_bytes_per_representative, num_bytes_representatives).on(req.get_endpoint());
         }
     }
 
@@ -986,33 +1060,10 @@ void distributed_stream_loader_t::use_these_allocated_variables(
     R = m_buf_representatives->at(0).sizes()[0];
     ASSERT(R > 0 && R == m_buf_targets->sizes()[0]
                  && R == m_buf_weights->sizes()[0]);
-    for (size_t i = 1; i < num_samples_per_representative; i++)
+    for (size_t i = 1; i < m_num_samples_per_representative; i++)
         ASSERT(R == m_buf_representatives->at(i).sizes()[0]);
 
     m_use_allocated_variables = true;
-
-    if (buf_activations.size() > 0) {
-        m_store_states = true;
-
-        std::vector<long> activation_shape(buf_activations[0].sizes().begin(), buf_activations[0].sizes().end());
-        num_bytes_per_activation = 4 * std::accumulate(activation_shape.begin(), activation_shape.end(), 1, std::multiplies<int>());
-        init_rehearsal_buffers(&m_rehearsal_activations, m_num_samples_per_activation, activation_shape, torch::cuda::is_available());
-
-        // Initializing server bulk
-        struct exposed_memory_attr server_attr;
-        memset(&server_attr, 0, sizeof(server_attr));
-        server_attr.bulk_mode = tl::bulk_mode::read_only;
-        create_exposed_memory(m_server_activations_mem, m_num_samples_per_activation, activation_shape, server_attr);
-        create_exposed_memory(m_server_activations_rep_mem, 1, representative_shape, server_attr);
-
-        // Initializing client bulk
-        struct exposed_memory_attr client_attr;
-        memset(&client_attr, 0, sizeof(client_attr));
-        client_attr.cuda = buffer_strategy == CUDABuffer;
-        client_attr.bulk_mode = tl::bulk_mode::write_only;
-        create_exposed_memory(m_client_activations_mem, m_num_samples_per_activation, activation_shape, client_attr);
-        create_exposed_memory(m_client_activations_rep_mem, 1, representative_shape, client_attr);
-    }
 }
 
 /**

@@ -48,12 +48,14 @@ struct queue_item_t {
             size = representatives[0].sizes()[0];
             aug_size = size;
 
-            ASSERT(aug_representatives[0].dim() > 0 && aug_targets.dim() == 1);
-            auto actual_R = aug_representatives[0].sizes()[0] - size;
-            ASSERT(actual_R > 0 && actual_R + size == aug_targets.sizes()[0]
-                                && actual_R + size == aug_weights.sizes()[0]);
-                                //&& actual_R + size == aug_amp.sizes()[0]
-                                //&& actual_R + size == aug_ph.sizes()[0]);
+            if (aug_representatives.size() > 0) {
+                ASSERT(aug_representatives[0].dim() > 0 && aug_targets.dim() == 1);
+                auto actual_R = aug_representatives[0].sizes()[0] - size;
+                ASSERT(actual_R > 0 && actual_R + size == aug_targets.sizes()[0]
+                                    && actual_R + size == aug_weights.sizes()[0]);
+                                    //&& actual_R + size == aug_amp.sizes()[0]
+                                    //&& actual_R + size == aug_ph.sizes()[0]);
+            }
 
             m_weights = torch::ones({size}, aug_weights.options());
     }

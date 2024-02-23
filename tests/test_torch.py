@@ -93,7 +93,7 @@ class TorchTests(unittest.TestCase):
             engine2,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 0, neomem.CPUBuffer, False, True
+            1, [3, 224, 224], 0, [], neomem.CPUBuffer, False, True
         )
 
         dsl1.register_endpoints({'tcp://127.0.0.1:1234': 0, 'tcp://127.0.0.1:1235': 1})
@@ -134,7 +134,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 0, neomem.CPUBuffer, False, self.verbose
+            1, [3, 224, 224], 0, [], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -179,7 +179,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 0, neomem.CPUBuffer, False, self.verbose
+            1, [3, 224, 224], 0, [], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -241,7 +241,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 0, neomem.CPUBuffer, False, self.verbose
+            1, [3, 224, 224], 0, [], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -295,7 +295,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            3, [1, 256, 256], 0, neomem.CPUBuffer, False, self.verbose
+            3, [1, 256, 256], 0, [], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -353,7 +353,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            3, [1, 256, 256], 0, neomem.CPUBuffer, False, self.verbose
+            3, [1, 256, 256], 0, [], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -396,10 +396,10 @@ class TorchTests(unittest.TestCase):
         # batch_size
         B = 32
         # num_representatives used for distillation
-        R_distillation = R
+        R_distillation = 16
 
         buf_activations = torch.zeros(R_distillation, K)
-        buf_activations_rep = torch.zeros(R_distillation, K)
+        buf_activations_rep = torch.zeros(R_distillation, 3, 224, 224)
         fake = torch.tensor([1])
 
         last_inputs = None
@@ -414,14 +414,16 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 1, neomem.CPUBuffer, False, self.verbose
+            1, [3, 224, 224], 1, [K], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
         dsl.start()
 
+        tmp = 0
         for _ in range(2):
             for inputs, target in loader:
+                tmp += 1
                 if last_inputs is not None:
                     dsl.accumulate(
                         [last_inputs],
@@ -445,9 +447,15 @@ class TorchTests(unittest.TestCase):
                 for i in range(target.size()[0]):
                     activations[:, i] = target[i]
 
-                if last_inputs is not None:
-                    for j in range(B, size):
-                        pass
+                if last_inputs is not None and tmp > 100:
+                    print(size)
+                    for j in range(B, B + R_distillation):
+                        # todo: change the API to avoid this
+                        index = j - B
+                        assert torch.allclose(buf_activations[index], buf_activations[index, 0])
+                        assert torch.allclose(buf_activations_rep[index], buf_activations_rep[index, 0, 0, 0])
+                        assert buf_activations[index, 0] == buf_activations_rep[index, 0, 0, 0]
+                        print(buf_activations[index, 0])
 
                 last_inputs = inputs
                 last_targets = target
@@ -472,7 +480,8 @@ class TorchTests(unittest.TestCase):
         R_distillation = R
 
         buf_activations = torch.zeros(R_distillation, K)
-        buf_activations_rep = torch.zeros(R_distillation, K)
+        buf_activations_rep = torch.zeros(R_distillation, 3, 224, 224)
+        fake = torch.tensor([1])
 
         last_inputs = None
         last_targets = None
@@ -486,14 +495,14 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 1, neomem.CPUBuffer, False, self.verbose
+            1, [3, 224, 224], 1, [K], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
         dsl.use_these_allocated_variables(
             [],
-            None,
-            None,
+            fake,
+            fake,
             [buf_activations],
             buf_activations_rep
         )
@@ -530,6 +539,18 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_standard_derpp_buffer(self):
+        """Test that a single rehearsal buffer (in standard mode)
+        returns the correct representatives and doesn't cause any crash.
+
+        The standard mode prepares a new augmented minibatch of size B + R
+        at every iteration i.e., copies the last batch of size B into the new one
+        and samples additional R representatives via `accumulate`.
+
+        Parameter `size` will have a max value of B + R.
+        
+        We send activations to the buffer too, useful for knowledge distillation.
+        We do leverage rehearsal here, thus there is a need to augment mini-batches.
+        """
         self.skipTest("skip")
 
         # num_classes
@@ -549,7 +570,7 @@ class TorchTests(unittest.TestCase):
         aug_labels = torch.randint(high=K, size=(B + R,))
         aug_weights = torch.zeros(B + R)
         buf_activations = torch.zeros(R_distillation, K)
-        buf_activations_rep = torch.zeros(R_distillation, K)
+        buf_activations_rep = torch.zeros(R_distillation, 3, 224, 224)
 
         last_inputs = None
         last_targets = None
@@ -563,7 +584,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 1, neomem.CPUBuffer, False, self.verbose
+            1, [3, 224, 224], 1, [K], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -624,7 +645,7 @@ class TorchTests(unittest.TestCase):
         buf_labels = torch.randint(high=K, size=(R,))
         buf_weights = torch.zeros(R)
         buf_activations = torch.zeros(R_distillation, K)
-        buf_activations_rep = torch.zeros(R_distillation, K)
+        buf_activations_rep = torch.zeros(R_distillation, 3, 224, 224)
 
         last_inputs = None
         last_targets = None
@@ -638,7 +659,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 1, neomem.CPUBuffer, False, self.verbose
+            1, [3, 224, 224], 1, [K], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -723,7 +744,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            3, [1, 256, 256], 2, neomem.CPUBuffer, False, self.verbose
+            3, [1, 256, 256], 2, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -815,7 +836,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Classification, K, N, R, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            3, [1, 256, 256], 2, neomem.CPUBuffer, False, self.verbose
+            3, [1, 256, 256], 2, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -901,7 +922,7 @@ class TorchTests(unittest.TestCase):
                 engine,
                 neomem.Classification, K, N, R, C,
                 ctypes.c_int64(torch.random.initial_seed()).value,
-                1, [3, 224, 224], 0, neomem.CPUBuffer, False, self.verbose
+                1, [3, 224, 224], 0, [], neomem.CPUBuffer, False, self.verbose
             )
             dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
             dsl.enable_augmentation(True)
@@ -913,75 +934,3 @@ class TorchTests(unittest.TestCase):
 
             dsl.finalize()
             engine.wait_for_finalize()
-
-    def test_neomem_standard_rehearsal_flyweight_distillation_buffer(self):
-        """Test that a single rehearsal buffer (in standard mode)
-        returns the correct representatives and doesn't cause any crash.
-
-        The standard mode prepares a new augmented minibatch of size B + R
-        at every iteration i.e., copies the last batch of size B into the new one
-        and samples additional R representatives via `accumulate`.
-
-        Parameter `size` will have a max value of B + R.
-        
-        We send activations to the buffer too, useful for knowledge distillation.
-        We do leverage rehearsal here, thus there is a need to augment mini-batches.
-        """
-        self.skipTest("Not implemented")
-        # num_classes
-        K = 100
-        # rehearsal_size
-        N = 65
-        # num_candidates
-        C = 20
-        # num_representatives
-        R = 20
-        # batch_size
-        B = 32
-
-        aug_samples = torch.zeros(B + R, 3, 224, 224)
-        aug_labels = torch.randint(high=K, size=(B + R,))
-        aug_weights = torch.zeros(B + R)
-
-        buf_samples = torch.zeros(R, 3, 224, 224)
-        buf_labels = torch.randint(high=K, size=(R,))
-        buf_weights = torch.zeros(R)
-        buf_activations = torch.zeros(R, K)
-
-        activations = None
-
-        dataset = MyDataset(K)
-        loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
-
-        engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
-        dsl = neomem.DistributedStreamLoader.create(
-            engine,
-            neomem.Classification, K, N, R, C,
-            ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 0, neomem.CPUBuffer, False, self.verbose
-        )
-        dsl.register_endpoints({'tcp://127.0.0.1:1234': 0})
-        dsl.enable_augmentation(True)
-        dsl.use_these_allocated_variables_state(buf_samples, buf_labels, buf_weights, buf_activations)
-        dsl.start()
-
-        for _ in range(2):
-            for inputs, target in loader:
-                if activations is not None:
-                    dsl.accumulate_state(inputs, target, activations, aug_samples, aug_labels, aug_weights)
-                size = dsl.wait()
-
-                # Training the DNN
-                # batch = aug_samples[:size]
-                # loss = model(batch) + alpha * mse(buf_samples[:size], buf_activations[:size])
-
-                activations = True
-
-                for j in range(B, size):
-                    assert torch.all(buf_samples[j] == buf_labels[j])
-
-        dsl.finalize()
-        engine.wait_for_finalize()
-
-    def test_neomem_standard_rehearsal_flyweight_distillation_ptycho_buffer(self):
-        self.skipTest("Not implemented")
