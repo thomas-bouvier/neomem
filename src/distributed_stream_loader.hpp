@@ -19,24 +19,30 @@
 
 namespace tl = thallium;
 
-enum Task { Classification, Reconstruction };
+enum Task { 
+    REHEARSAL,
+    KD,
+    REHEARSAL_KD
+};
 enum BufferStrategy { NoBuffer, CPUBuffer, CUDABuffer };
 
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
 private:
     distributed_stream_loader_t(const engine_loader_t& _engine_loader, Task _task_type,
-        unsigned int K, unsigned int N, unsigned int R, unsigned int C, int64_t seed,
-        unsigned int num_samples_per_representative, std::vector<long> representative_shape,
-        unsigned int num_samples_per_activation, std::vector<long> activation_shape,
+        unsigned int K, unsigned int N, unsigned int C, int64_t seed,
+        unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
+        unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
         BufferStrategy buffer_strategy,
-        bool discover_endpoints = false, bool verbose = false);
+        bool discover_endpoints = false, bool verbose = false
+    );
     
 public:
     static distributed_stream_loader_t* create(const engine_loader_t& engine_loader, Task task_type,
-    unsigned int K, unsigned int N, unsigned int R, unsigned int C, int64_t seed,
-    unsigned int num_samples_per_representative, std::vector<long> representative_shape,
-    unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-    BufferStrategy buffer_strategy, bool discover_endpoints, bool verbose);
+        unsigned int K, unsigned int N, unsigned int C, int64_t seed,
+        unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
+        unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
+        BufferStrategy buffer_strategy, bool discover_endpoints, bool verbose
+    );
     ~distributed_stream_loader_t() noexcept;
     void finalize();
 
@@ -48,7 +54,7 @@ public:
             const std::vector<torch::Tensor>& aug_representatives, const torch::Tensor& aug_targets, const torch::Tensor& aug_weights,
             const std::vector<torch::Tensor>& buf_activations, const torch::Tensor& buf_activations_rep);
 
-    int wait();
+    std::tuple<int, int> wait();
 
     void use_these_allocated_variables(
         const std::vector<torch::Tensor>& buf_representatives, const torch::Tensor& buf_targets, const torch::Tensor& buf_weights,
@@ -67,14 +73,14 @@ protected:
     void init_receiving_rdma_buffer(std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nsamples, std::vector<long> sample_shape);
 
     void copy_last_batch(const queue_item_t &batch);
-    std::size_t dispatch_rpcs(std::vector<tl::async_response> &responses);
+    void dispatch_rpcs(std::vector<tl::async_response> &responses);
     void resolve_rpcs(std::vector<tl::async_response> &responses, queue_item_t &batch);
 
     const size_t MAX_QUEUE_SIZE = 1024;
 
     //---------------------------------Will be moved to buffer class
-    Task task_type;
-    unsigned int K, N, R, C;
+    Task m_task_type;
+    unsigned int K, N, C, m_R, m_R_distillation;
     std::default_random_engine rand_gen;
     unsigned int m_num_samples_per_representative, m_num_bytes_per_representative;
     std::vector<long> representative_shape;
@@ -106,8 +112,6 @@ protected:
     bool m_augmentation_enabled = false;
     bool m_measure_performance = false;
     bool m_use_allocated_variables = false;
-    bool m_augment_batches = false;
-    bool m_store_states = false;
 
     std::shared_ptr<std::vector<torch::Tensor>> m_buf_representatives;
     std::shared_ptr<torch::Tensor> m_buf_targets, m_buf_weights;
@@ -127,7 +131,8 @@ protected:
     tl::managed<tl::xstream> es;
     tl::managed<tl::thread> async_thread;
     std::vector<tl::provider_handle> provider_handles;
-    tl::remote_procedure m_client_procedure, m_server_procedure;
+    tl::remote_procedure m_server_representatives_procedure, m_server_activations_procedure;
+    tl::remote_procedure m_client_representatives_procedure, m_client_activations_procedure;
 
     std::map<std::string, int> gather_endpoints();
     bool mpi_was_initialized = false;
@@ -146,10 +151,16 @@ protected:
 
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
 
-    void get_remote_samples(
+    int count_samples(const std::vector<std::tuple<size_t, float, std::vector<int>>>& samples) const;
+    std::vector<std::tuple<size_t, float, std::vector<int>>> get_actual_rehearsal_indices(const std::vector<int>& indices) const;
+    void get_remote_representatives(
         const tl::request& req,
-        std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int offset,
-        std::vector<tl::bulk>& client_activations_bulk, std::vector<tl::bulk>& client_activations_rep_bulk
+        std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int offset
+    );
+    void get_remote_activations(
+        const tl::request& req,
+        std::vector<tl::bulk>& client_activations_bulk, std::vector<tl::bulk>& client_activations_rep_bulk,
+        const std::vector<int>& indices, int offset
     );
 
     std::vector<std::vector<std::tuple<int, float, size_t, size_t>>> metadata;

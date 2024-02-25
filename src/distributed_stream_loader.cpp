@@ -50,23 +50,27 @@ void checkLast(const char* const file, const int line) {
  * buffers.
  */
 distributed_stream_loader_t::distributed_stream_loader_t(
-        const engine_loader_t& _engine_loader, Task _task_type,
-        unsigned int _K, unsigned int _N, unsigned int _R, unsigned int _C, int64_t seed,
-        unsigned int num_samples_per_representative, std::vector<long> _representative_shape,
-        unsigned int num_samples_per_activation, std::vector<long> activation_shape,
+        const engine_loader_t& _engine_loader, Task task_type,
+        unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
+        unsigned int R, unsigned int num_samples_per_representative, std::vector<long> _representative_shape,
+        unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
         BufferStrategy _buffer_strategy, bool discover_endpoints, bool _verbose)
               : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id()),
                 m_provider_id(_engine_loader.get_id()),
-                task_type(_task_type), K(_K), N(_N), R(_R), C(_C), rand_gen(seed),
-                m_num_samples_per_representative(num_samples_per_representative), representative_shape(_representative_shape),
-                m_num_samples_per_activation(num_samples_per_activation), m_activation_shape(activation_shape),
+                m_task_type(task_type), K(_K), N(_N), C(_C), rand_gen(seed),
+                m_R(R), m_num_samples_per_representative(num_samples_per_representative), representative_shape(_representative_shape),
+                m_R_distillation(R_distillation), m_num_samples_per_activation(num_samples_per_activation), m_activation_shape(activation_shape),
                 buffer_strategy(_buffer_strategy), verbose(_verbose)
 {
     m_num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
 
-    m_server_procedure = define("get_samples", &distributed_stream_loader_t::get_remote_samples);
+    // Register server procedures
+    m_server_representatives_procedure = define("get_representatives", &distributed_stream_loader_t::get_remote_representatives);
+    m_server_activations_procedure = define("get_activations", &distributed_stream_loader_t::get_remote_activations);
+
     // Register the remote procedure
-    m_client_procedure = get_engine().define("get_samples");
+    m_client_representatives_procedure = get_engine().define("get_representatives");
+    m_client_activations_procedure = get_engine().define("get_activations");
 
     // Setup a finalization callback for this provider, in case it is
     // still alive when the engine is finalized.
@@ -120,7 +124,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     );
 
     // Initialize 
-    if (m_augment_batches) {
+    if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
         init_receiving_rdma_buffer(
             m_server_mems,
             m_client_mems,
@@ -129,8 +133,8 @@ distributed_stream_loader_t::distributed_stream_loader_t(
         );
     }
 
-    if (m_num_samples_per_activation > 0) {
-        m_store_states = true;
+    if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
+        ASSERT(m_num_samples_per_activation > 0);
         m_num_bytes_per_activation = 4 * std::accumulate(activation_shape.begin(), activation_shape.end(), 1, std::multiplies<int>());
 
         init_rehearsal_buffers(
@@ -161,14 +165,15 @@ distributed_stream_loader_t::distributed_stream_loader_t(
  * from putting an instance of distributed_stream_loader_t on the stack.
  */
 /* static */ distributed_stream_loader_t* distributed_stream_loader_t::create(const engine_loader_t& engine_loader, Task task_type,
-    unsigned int K, unsigned int N, unsigned int R, unsigned int C, int64_t seed,
-    unsigned int num_samples_per_representative, std::vector<long> representative_shape,
-    unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-    BufferStrategy buffer_strategy,
-    bool discover_endpoints, bool verbose) {
+        unsigned int K, unsigned int N, unsigned int C, int64_t seed,
+        unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
+        unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
+        BufferStrategy buffer_strategy, bool discover_endpoints, bool verbose)
+{
     return new distributed_stream_loader_t(
-        engine_loader, task_type, K, N, R, C, seed,
-        num_samples_per_representative, representative_shape, num_samples_per_activation, activation_shape,
+        engine_loader, task_type, K, N, C, seed,
+        R, num_samples_per_representative, representative_shape,
+        R_distillation, num_samples_per_activation, activation_shape,
         buffer_strategy, discover_endpoints, verbose
     );
 }
@@ -273,7 +278,7 @@ void distributed_stream_loader_t::create_exposed_memory(
         std::vector<exposed_memory_t>& exposed_memory, size_t nsamples, std::vector<long> sample_shape, exposed_memory_attr attr)
 {
     auto nbytes = 4 * std::accumulate(sample_shape.begin(), sample_shape.end(), 1, std::multiplies<int>());
-    sample_shape.insert(sample_shape.begin(), R);
+    sample_shape.insert(sample_shape.begin(), m_R);
 
     for (size_t r = 0; r < nsamples; r++) {
         exposed_memory_t memory;
@@ -296,7 +301,7 @@ void distributed_stream_loader_t::create_exposed_memory(
         else
             hg_attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
 
-        memory.segments.emplace_back(memory.buffer->data_ptr(), R * nbytes);
+        memory.segments.emplace_back(memory.buffer->data_ptr(), m_R * nbytes);
         memory.bulk = get_engine().expose(memory.segments, attr.bulk_mode, hg_attr);
 
         exposed_memory.emplace_back(std::move(memory));
@@ -351,18 +356,22 @@ void distributed_stream_loader_t::async_process()
         // Initialization of the augmented result, which changes at every
         // iteration with implementation `standard`
         if (!m_use_allocated_variables) {
-            if (m_augment_batches) {
+            if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
                 m_buf_representatives = std::make_shared<std::vector<torch::Tensor>>(batch.m_aug_representatives);
                 m_buf_targets = std::make_shared<torch::Tensor>(batch.m_aug_targets);
                 m_buf_weights = std::make_shared<torch::Tensor>(batch.m_aug_weights);
+
+                ASSERT(m_buf_representatives->size() == m_num_samples_per_representative);
 
                 batch.m_augmentation_mark = batch.get_size();
                 copy_last_batch(batch);
             }
 
-            if (m_store_states) { 
+            if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) { 
                 m_buf_activations = std::make_shared<std::vector<torch::Tensor>>(batch.m_buf_activations);
                 m_buf_activations_rep = std::make_shared<torch::Tensor>(batch.m_buf_activations_rep);
+
+                ASSERT(m_buf_activations->size() == m_num_samples_per_activation);
             }
         }
 
@@ -486,49 +495,63 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch)
 /**
  * This function dispatches rpc requests to get R remote representatives.
  */
-std::size_t distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses)
+void distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses)
 {
     if (verbose)
         DBG("[" << m_provider_id << "] Dispatching rpcs");
 
-    std::vector<tl::bulk> client_bulks;
-    std::vector<tl::bulk> client_activations_bulks, client_activations_rep_bulks;
 
-    if (m_augment_batches) {
+    if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
+        std::vector<tl::bulk> client_bulks;
         for (size_t i = 0; i < m_client_mems.size(); i++) {
             client_bulks.push_back(m_client_mems[i].bulk);
         }
+
+        // Iterate over nodes and issuing corresponding rpc requests
+        std::unordered_map<int, std::vector<int>> representatives_indices_per_node = pick_random_indices(m_R);
+
+        auto offset = 0;
+        for (const auto& indices : representatives_indices_per_node) {
+            tl::provider_handle& ph = provider_handles[indices.first];
+
+            auto response = m_client_representatives_procedure.on(ph).async(
+                client_bulks, indices.second, offset
+            );
+            responses.push_back(std::move(response));
+
+            // Valid because the offset and num_bytes_per_representative are equal for each sample (including amp and ph)
+            offset += indices.second.size();
+        }
+        ASSERT(responses.size() == representatives_indices_per_node.size());
     }
 
-    if (m_store_states) {
+    if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
+        std::vector<tl::bulk> client_activations_bulks, client_activations_rep_bulks;
         for (size_t i = 0; i < m_client_activations_mem.size(); i++) {
             client_activations_bulks.push_back(m_client_activations_mem[i].bulk);
         }
         for (size_t i = 0; i < m_client_activations_rep_mem.size(); i++) {
             client_activations_rep_bulks.push_back(m_client_activations_rep_mem[i].bulk);
         }
+
+        std::unordered_map<int, std::vector<int>> activations_indices_per_node = pick_random_indices(m_R_distillation);
+
+        auto offset = 0;
+        for (const auto& indices : activations_indices_per_node) {
+            tl::provider_handle& ph = provider_handles[indices.first];
+
+            auto response = m_client_activations_procedure.on(ph).async(
+                client_activations_bulks, client_activations_rep_bulks, indices.second, offset
+            );
+            responses.push_back(std::move(response));
+
+            // Valid because the offset and num_bytes_per_representative are equal for each sample (including amp and ph)
+            offset += indices.second.size();
+        }
+        ASSERT(responses.size() == activations_indices_per_node.size());
     }
-
-    // Iterate over nodes and issuing corresponding rpc requests
-    std::unordered_map<int, std::vector<int>> indices_per_node = pick_random_indices(R);
-
-    auto offset = 0;
-    for (const auto& indices : indices_per_node) {
-        tl::provider_handle& ph = provider_handles[indices.first];
-
-        auto response = m_client_procedure.on(ph).async(
-            client_bulks, indices.second, offset,
-            client_activations_bulks, client_activations_rep_bulks
-        );
-        responses.push_back(std::move(response));
-
-        // Valid because the offset and num_bytes_per_representative are equal for each sample (including amp and ph)
-        offset += indices.second.size();
-    }
-    ASSERT(responses.size() == indices_per_node.size());
 
     m_metrics[i_batch].bulk_prepare_time = 0;
-    return indices_per_node.size();
 }
 
 /**
@@ -561,7 +584,7 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
                 memory_sections.emplace_back(*offset, *num_targets);
             }
 
-            if (m_augment_batches) {
+            if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
                 for (size_t j = 0; j < *num_targets; j++) {
 #ifndef WITHOUT_CUDA
                     CHECK_CUDA_ERROR(cudaMemcpyAsync(
@@ -585,6 +608,10 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
 #endif
                     batch.aug_size++;
                 }
+            }
+
+            if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
+                batch.activations_size++;
             }
         }
     }
@@ -646,18 +673,20 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_i
         // First element is the offset in the client exposed memory, second
         // element is the chunk size in bytes.
 #ifndef WITHOUT_CUDA
-        for (size_t r = 0; r < m_buf_representatives->size(); r++) {
-            CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                (char *) m_buf_representatives->at(r).data_ptr() + (batch.m_augmentation_mark + cumulated_offset) * m_num_bytes_per_representative,
-                (char *) m_client_mems[r].buffer->data_ptr() + pair.first * m_num_bytes_per_representative,
-                pair.second * m_num_bytes_per_representative,
-                cudaMemcpyDefault,
-                m_streams[0]
-            ));
+        if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
+            for (size_t r = 0; r < m_num_samples_per_representative; r++) {
+                CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                    (char *) m_buf_representatives->at(r).data_ptr() + (batch.m_augmentation_mark + cumulated_offset) * m_num_bytes_per_representative,
+                    (char *) m_client_mems[r].buffer->data_ptr() + pair.first * m_num_bytes_per_representative,
+                    pair.second * m_num_bytes_per_representative,
+                    cudaMemcpyDefault,
+                    m_streams[0]
+                ));
+            }
         }
 #else
-        if (m_augment_batches) {
-            for (size_t r = 0; r < m_buf_representatives->size(); r++) {
+        if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
+            for (size_t r = 0; r < m_num_samples_per_representative; r++) {
                 std::memcpy(
                     (char *) m_buf_representatives->at(r).data_ptr() + (batch.m_augmentation_mark + cumulated_offset) * m_num_bytes_per_representative,
                     (char *) m_client_mems[r].buffer->data_ptr() + pair.first * m_num_bytes_per_representative,
@@ -666,9 +695,9 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_i
             }
         }
 
-        if (m_store_states) {
+        if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
             // Copying activations
-            for (size_t r = 0; r < m_buf_activations->size(); r++) {
+            for (size_t r = 0; r < m_num_samples_per_activation; r++) {
                 std::memcpy(
                     (char *) m_buf_activations->at(r).data_ptr() + cumulated_offset * m_num_bytes_per_activation,
                     (char *) m_client_activations_mem[r].buffer->data_ptr() + pair.first * m_num_bytes_per_activation,
@@ -761,7 +790,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
                 m_streams[1]
             ));
         }
-        if (m_store_states) {
+        if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
                 (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * j,
                 (char *) batch.m_activations[0].data_ptr() + m_num_bytes_per_activation * i,
@@ -778,7 +807,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
                 m_num_bytes_per_representative
             );
         }
-        if (m_store_states) {
+        if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
             for (size_t k = 0; k < batch.m_activations.size(); k++) {
                 std::memcpy(
                     (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * (batch.m_activations.size() * j + k),
@@ -818,33 +847,21 @@ void distributed_stream_loader_t::update_representative_weights(const queue_item
     }
 }
 
-/*
- * This function is invoked via a client rpc, thus executed on a server
- * instance.
+/**
+ * Input
+ * Vector of indices
  *
- * j is the offset where this server procedure should write into the client buffer.
+ * Output
+ * Rehearsal buffer, unordered map indexed by labels
+ * - (label1, weight, reprs_indices)
+ * - (label2, weight, reprs_indices)
+ *
+ * If a representative is already present for a label, the representative
+ * index is appended to repr_indices.
  */
-void distributed_stream_loader_t::get_remote_samples(
-        const tl::request& req,
-        std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int offset, 
-        std::vector<tl::bulk>& client_activations_bulks, std::vector<tl::bulk>& client_activations_rep_bulks)
-{
-    nvtx3::scoped_range nvtx{"get_remote_samples"};
-
-    int c = 0, o = 0;
+std::vector<std::tuple<size_t, float, std::vector<int>>> distributed_stream_loader_t::get_actual_rehearsal_indices(const std::vector<int>& indices) const {
     std::vector<std::tuple<size_t, float, std::vector<int>>> samples;
 
-    /**
-    * Input
-    * Vector of indices
-    *
-    * Output
-    * Rehearsal buffer, unordered map indexed by labels
-    * - (label1, weight, reprs_indices)
-    * - (label2, weight, reprs_indices)
-    * If a representative is already present for a label, the representative
-    * index is appended to repr_indices.
-    **/
     if (m_rehearsal_size > 0) {
         for (auto index : indices) {
             size_t rehearsal_class_index = index / N;
@@ -873,44 +890,60 @@ void distributed_stream_loader_t::get_remote_samples(
                     std::get<2>(el).push_back(i * N + rehearsal_repr_of_class_index);
                 }
             }
-
-            c++;
         }
     }
 
-    if (verbose && c > 0) {
-        if (m_augment_batches) {
-            std::cout << "[" << m_provider_id << "] Sending " << c << "/" << indices.size()  << " representatives from "
-                << samples.size() << " different classes to remote node (endpoint: "
-                << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_bulks.size() << " client bulks)" << std::endl;
-        }
+    return samples;
+}
 
-        if (m_store_states) {
-            std::cout << "[" << m_provider_id << "] Sending " << c << "/" << indices.size()  << " activations and associated representatives from "
-                << samples.size() << " different classes to remote node (endpoint: "
-                << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_activations_bulks.size() << " client activation bulks)" << std::endl;
-        }
+int distributed_stream_loader_t::count_samples(const std::vector<std::tuple<size_t, float, std::vector<int>>>& samples) const {
+    size_t nsamples = 0;
+
+    std::for_each(samples.begin(), samples.end(), [&nsamples](const auto& sample) {
+        const auto& indices = std::get<2>(sample);
+        nsamples += indices.size();
+    });
+
+    return nsamples;
+}
+
+/*
+ * This function is invoked via a client rpc, thus executed on a server
+ * instance. Fill the RDMA buffer with representative tensors.
+ *
+ * j is the offset where this server procedure should write into the client buffer.
+ *
+ * Input
+ * Rehearsal buffer, unordered map indexed by labels
+ * - (label1, weight, reprs_indices)
+ * - (label2, weight, reprs_indices)
+ *
+ * Output
+ * Metadata, vector (to preserve the order) of tuples
+ * - {(label1, weight, num_reprs), (label2, weight, num_reprs)}
+ * Segments
+ * - {(ptrrepA, nbytesA) (ptrrepB, nbytesB) (ptrrepC, nbytesC) (ptrrepD, nbytesD)}
+ *
+ * repA and repB are of label1, repC and repD are of label2
+ */
+void distributed_stream_loader_t::get_remote_representatives(
+        const tl::request& req,
+        std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int offset)
+{
+    nvtx3::scoped_range nvtx{"get_remote_representatives"};
+
+    std::vector<std::tuple<size_t, float, std::vector<int>>> samples = get_actual_rehearsal_indices(indices);
+    const size_t nrepresentatives = count_samples(samples);
+
+    if (verbose && nrepresentatives > 0) {
+        std::cout << "[" << m_provider_id << "] Sending " << nrepresentatives << "/" << indices.size()  << " representatives from "
+            << samples.size() << " different classes to remote node (endpoint: "
+            << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_bulks.size() << " client bulks)" << std::endl;
     }
 
-    /**
-    * Fill the RDMA buffer with tensors
-    *
-    * Input
-    * Rehearsal buffer, unordered map indexed by labels
-    * - (label1, weight, reprs_indices)
-    * - (label2, weight, reprs_indices)
-    *
-    *
-    * Output
-    * Metadata, vector (to preserve the order) of tuples
-    * - {(label1, weight, num_reprs), (label2, weight, num_reprs)}
-    * Segments
-    * - {(ptrrepA, nbytesA) (ptrrepB, nbytesB) (ptrrepC, nbytesC) (ptrrepD, nbytesD)}
-    *
-    * repA and repB are of label1, repC and repD are of label2
-    **/
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
+    int o = 0;
     std::vector<std::tuple<int, float, size_t, size_t>> attached_metadata;
     for (const auto &el : samples) {
         int label;
@@ -922,68 +955,122 @@ void distributed_stream_loader_t::get_remote_samples(
 
         for (size_t i = 0; i < reprs_indices.size(); i++) {
 #ifndef WITHOUT_CUDA
-            if (m_augment_batches) {
-                for (size_t r = 0; r < m_num_samples_per_representative; r++) {
-                    const int index = m_num_samples_per_representative * reprs_indices[i] + r;
-                    CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                        (char *) server_mems[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
-                        m_rehearsal_representatives->index({index}).data_ptr(),
-                        m_num_bytes_per_representative,
-                        cudaMemcpyDefault,
-                        m_streams[2]
-                    ));
-                }
-            }
-
-            if (m_store_states) {
-                // todo
+            for (size_t r = 0; r < m_num_samples_per_representative; r++) {
+                const int index = m_num_samples_per_representative * reprs_indices[i] + r;
+                CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                    (char *) server_mems[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
+                    m_rehearsal_representatives->index({index}).data_ptr(),
+                    m_num_bytes_per_representative,
+                    cudaMemcpyDefault,
+                    m_streams[2]
+                ));
             }
 #else
-            if (m_augment_batches) {
-                for (size_t r = 0; r < m_num_samples_per_representative; r++) {
-                    const int index = m_num_samples_per_representative * reprs_indices[i] + r;
-                    m_server_mems[r].buffer->index_put_({o}, m_rehearsal_representatives->index({index}));
-                }
-            }
-
-            if (m_store_states) {
-                for (size_t r = 0; r < m_num_samples_per_activation; r++) {
-                    const int index = m_num_samples_per_activation * reprs_indices[i] + r;
-                    m_server_activations_mem[r].buffer->index_put_({o}, m_rehearsal_activations->index({index}));
-                }
-                m_server_activations_rep_mem[0].buffer->index_put_({o}, m_rehearsal_representatives->index({reprs_indices[i]}));
+            for (size_t r = 0; r < m_num_samples_per_representative; r++) {
+                const int index = m_num_samples_per_representative * reprs_indices[i] + r;
+                m_server_mems[r].buffer->index_put_({o}, m_rehearsal_representatives->index({index}));
             }
 #endif
             o++;
         }
     }
-    ASSERT(c == o);
+    ASSERT(nrepresentatives == o);
     ASSERT(samples.size() == attached_metadata.size());
 
-    if (c > 0) {
+    if (nrepresentatives > 0) {
 #ifndef WITHOUT_CUDA
         // The rehearsal_mutex is still held
         cudaStreamSynchronize(m_streams[2]);
 #endif
 
-        auto num_bytes_representatives = c * m_num_bytes_per_representative;
+        const auto num_bytes_representatives = nrepresentatives * m_num_bytes_per_representative;
 
-        if (m_augment_batches) {
-            for (size_t r = 0; r < m_num_samples_per_representative; r++) {
-                m_server_mems[r].bulk(0, num_bytes_representatives)
-                    >> client_bulks[r](offset * m_num_bytes_per_representative, num_bytes_representatives).on(req.get_endpoint());
-            }
+        for (size_t r = 0; r < m_num_samples_per_representative; r++) {
+            m_server_mems[r].bulk(0, num_bytes_representatives)
+                >> client_bulks[r](offset * m_num_bytes_per_representative, num_bytes_representatives).on(req.get_endpoint());
         }
+    }
 
-        if (m_store_states) {
-            auto num_bytes_activations = c * m_num_bytes_per_activation;
+    req.respond(attached_metadata);
+}
+
+/*
+ * This function is invoked via a client rpc, thus executed on a server
+ * instance. Fill the RDMA buffer with activation tensors.
+ *
+ * j is the offset where this server procedure should write into the client buffer.
+ *
+ * Input
+ * Rehearsal buffer, unordered map indexed by labels
+ * - (label1, weight, reprs_indices)
+ * - (label2, weight, reprs_indices)
+ *
+ * Output
+ * Metadata, vector (to preserve the order) of tuples
+ * - {(label1, weight, num_reprs), (label2, weight, num_reprs)}
+ * Segments
+ * - {(ptrrepA, nbytesA) (ptrrepB, nbytesB) (ptrrepC, nbytesC) (ptrrepD, nbytesD)}
+ *
+ * repA and repB are of label1, repC and repD are of label2
+ */
+void distributed_stream_loader_t::get_remote_activations(
+        const tl::request& req,
+        std::vector<tl::bulk>& client_activations_bulks, std::vector<tl::bulk>& client_activations_rep_bulks, const std::vector<int>& indices, int offset)
+{
+    nvtx3::scoped_range nvtx{"get_remote_activations"};
+
+    std::vector<std::tuple<size_t, float, std::vector<int>>> samples = get_actual_rehearsal_indices(indices);
+    const size_t nactivations = count_samples(samples);
+
+    if (verbose && nactivations > 0) {
+        std::cout << "[" << m_provider_id << "] Sending " << nactivations << "/" << indices.size()  << " activations and associated representatives from "
+            << samples.size() << " different classes to remote node (endpoint: "
+            << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_activations_bulks.size() << " client activation bulks)" << std::endl;
+    }
+
+    std::unique_lock<tl::mutex> lock(rehearsal_mutex);
+
+    int o = 0;
+    std::vector<std::tuple<int, float, size_t, size_t>> attached_metadata;
+    for (const auto &el : samples) {
+        int label;
+        float weight;
+        std::vector<int> reprs_indices;
+        std::tie(label, weight, reprs_indices) = el;
+
+        attached_metadata.emplace_back(std::make_tuple(label, weight, reprs_indices.size(), offset + o));
+
+        for (size_t i = 0; i < reprs_indices.size(); i++) {
+#ifndef WITHOUT_CUDA
+            // todo
+#else
             for (size_t r = 0; r < m_num_samples_per_activation; r++) {
-                m_server_activations_mem[r].bulk(0, num_bytes_activations)
-                    >> client_activations_bulks[r](offset * m_num_bytes_per_activation, num_bytes_activations).on(req.get_endpoint());
+                const int index = m_num_samples_per_activation * reprs_indices[i] + r;
+                m_server_activations_mem[r].buffer->index_put_({o}, m_rehearsal_activations->index({index}));
             }
-            m_server_activations_rep_mem[0].bulk(0, num_bytes_representatives)
-                >> client_activations_rep_bulks[0](offset * m_num_bytes_per_representative, num_bytes_representatives).on(req.get_endpoint());
+            m_server_activations_rep_mem[0].buffer->index_put_({o}, m_rehearsal_representatives->index({reprs_indices[i]}));
+#endif
+            o++;
         }
+    }
+    ASSERT(nactivations == o);
+    ASSERT(samples.size() == attached_metadata.size());
+
+    if (nactivations > 0) {
+#ifndef WITHOUT_CUDA
+        // The rehearsal_mutex is still held
+        cudaStreamSynchronize(m_streams[2]);
+#endif
+
+        const auto num_bytes_representatives = nactivations * m_num_bytes_per_representative;
+        const auto num_bytes_activations = nactivations * m_num_bytes_per_activation;
+
+        for (size_t r = 0; r < m_num_samples_per_activation; r++) {
+            m_server_activations_mem[r].bulk(0, num_bytes_activations)
+                >> client_activations_bulks[r](offset * m_num_bytes_per_activation, num_bytes_activations).on(req.get_endpoint());
+        }
+        m_server_activations_rep_mem[0].bulk(0, num_bytes_representatives)
+            >> client_activations_rep_bulks[0](offset * m_num_bytes_per_representative, num_bytes_representatives).on(req.get_endpoint());
     }
 
     req.respond(attached_metadata);
@@ -1050,18 +1137,27 @@ void distributed_stream_loader_t::accumulate(
 void distributed_stream_loader_t::use_these_allocated_variables(
         const std::vector<torch::Tensor>& buf_representatives, const torch::Tensor& buf_targets, const torch::Tensor& buf_weights, const std::vector<torch::Tensor>& buf_activations, const torch::Tensor& buf_activations_rep)
 {
-    m_buf_representatives = std::make_shared<std::vector<torch::Tensor>>(buf_representatives);
-    m_buf_targets = std::make_shared<torch::Tensor>(buf_targets);
-    m_buf_weights = std::make_shared<torch::Tensor>(buf_weights);
-    m_buf_activations = std::make_shared<std::vector<torch::Tensor>>(buf_activations);
-    m_buf_activations_rep = std::make_shared<torch::Tensor>(buf_activations_rep);
+    if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
+        m_buf_representatives = std::make_shared<std::vector<torch::Tensor>>(buf_representatives);
+        m_buf_targets = std::make_shared<torch::Tensor>(buf_targets);
+        m_buf_weights = std::make_shared<torch::Tensor>(buf_weights);
 
-    ASSERT(m_buf_representatives->at(0).dim() > 0 && m_buf_targets->dim() == 1);
-    R = m_buf_representatives->at(0).sizes()[0];
-    ASSERT(R > 0 && R == m_buf_targets->sizes()[0]
-                 && R == m_buf_weights->sizes()[0]);
-    for (size_t i = 1; i < m_num_samples_per_representative; i++)
-        ASSERT(R == m_buf_representatives->at(i).sizes()[0]);
+        ASSERT(m_buf_representatives->size() == m_num_samples_per_representative);
+        ASSERT(m_buf_representatives->at(0).dim() > 0 && m_buf_targets->dim() == 1);
+
+        m_R = m_buf_representatives->at(0).sizes()[0];
+        ASSERT(m_R > 0 && m_R == m_buf_targets->sizes()[0]
+                    && m_R == m_buf_weights->sizes()[0]);
+        for (size_t i = 1; i < m_num_samples_per_representative; i++)
+            ASSERT(m_R == m_buf_representatives->at(i).sizes()[0]);
+    }
+
+    if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
+        m_buf_activations = std::make_shared<std::vector<torch::Tensor>>(buf_activations);
+        m_buf_activations_rep = std::make_shared<torch::Tensor>(buf_activations_rep);
+
+        ASSERT(m_buf_activations->size() == m_num_samples_per_activation);
+    }
 
     m_use_allocated_variables = true;
 }
@@ -1071,7 +1167,7 @@ void distributed_stream_loader_t::use_these_allocated_variables(
  * data processed by the client thread. If no data is ready, we just wait,
  * blocking the Python thread.
  */
-int distributed_stream_loader_t::wait()
+std::tuple<int, int> distributed_stream_loader_t::wait()
 {
     nvtx3::scoped_range nvtx{"wait"};
 
@@ -1080,7 +1176,7 @@ int distributed_stream_loader_t::wait()
         request_cond.wait(lock);
     auto batch = response_queue.front();
     response_queue.pop_front();
-    return batch.aug_size;
+    return std::make_tuple(batch.aug_size, batch.activations_size);
 }
 
 void distributed_stream_loader_t::enable_augmentation(bool state)
@@ -1118,7 +1214,9 @@ void distributed_stream_loader_t::finalize()
 
 distributed_stream_loader_t::~distributed_stream_loader_t() noexcept
 {
-    m_server_procedure.deregister();
+    m_server_representatives_procedure.deregister();
+    m_server_activations_procedure.deregister();
+
     // Pop the finalize callback. If this destructor was called
     // from the finalization callback, there is nothing to pop
     get_engine().pop_finalize_callback(this);
@@ -1133,7 +1231,7 @@ distributed_stream_loader_t::~distributed_stream_loader_t() noexcept
 #endif
 
     delete m_rehearsal_representatives;
-    if (m_store_states)
+    if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD)
         delete m_rehearsal_activations;
 }
 

@@ -32,8 +32,9 @@ PYBIND11_MODULE(neomem, m) {
         .def("finalize", &distributed_stream_loader_t::finalize, py::call_guard<py::gil_scoped_release>());
 
     py::enum_<Task>(m, "Task")
-        .value("Classification", Classification)
-        .value("Reconstruction", Reconstruction)
+        .value("Rehearsal", REHEARSAL)
+        .value("KD", KD)
+        .value("Rehearsal_KD", REHEARSAL_KD)
         .export_values();
     
     py::enum_<BufferStrategy>(m, "BufferStrategy")
