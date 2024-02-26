@@ -103,12 +103,7 @@ protected:
     std::map<int, metrics_t> m_metrics;
 
 #ifndef WITHOUT_CUDA
-    cudaStream_t m_streams[3];
-    /*
-    std::unique_ptr<cuda::stream_t> m_client_stream_async;
-    std::unique_ptr<cuda::stream_t> m_client_stream_sync;
-    std::unique_ptr<cuda::stream_t> m_server_stream_sync;
-    */
+    std::array<cudaStream_t, 4> m_streams;
 #endif
 
     bool started = false;

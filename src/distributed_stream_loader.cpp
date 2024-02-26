@@ -1046,7 +1046,7 @@ void distributed_stream_loader_t::get_remote_activations(
                     m_rehearsal_activations->index({index}).data_ptr(),
                     m_num_bytes_per_activation,
                     cudaMemcpyDefault,
-                    m_streams[2]
+                    m_streams[3]
                 ));
             }
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
@@ -1054,7 +1054,7 @@ void distributed_stream_loader_t::get_remote_activations(
                 m_rehearsal_representatives->index({reprs_indices[i]}).data_ptr(),
                 m_num_bytes_per_representative,
                 cudaMemcpyDefault,
-                m_streams[2]
+                m_streams[3]
             ));
 #else
             for (size_t r = 0; r < m_num_samples_per_activation; r++) {
@@ -1245,9 +1245,9 @@ distributed_stream_loader_t::~distributed_stream_loader_t() noexcept
     es->join();
 
 #ifndef WITHOUT_CUDA
-    for (int i = 0; i < 3; ++i) {
-        cudaStreamSynchronize(m_streams[i]);
-        cudaStreamDestroy(m_streams[i]);
+    for (auto& stream : m_streams) {
+        cudaStreamSynchronize(stream);
+        cudaStreamDestroy(stream);
     }
 #endif
 
