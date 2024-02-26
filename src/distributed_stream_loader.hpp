@@ -73,7 +73,7 @@ protected:
     uint16_t m_provider_id;
 
     void init_rehearsal_buffers(torch::Tensor** storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
-    void init_receiving_rdma_buffer(std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nsamples, std::vector<long> sample_shape);
+    void init_receiving_rdma_buffer(std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nelements, size_t nsamples_per_element, std::vector<long> sample_shape);
 
     void copy_last_batch(const queue_item_t &batch);
     void dispatch_rpcs(std::vector<tl::async_response> &responses);
@@ -143,7 +143,7 @@ protected:
     void augment_batch(queue_item_t &batch);
     std::vector<std::pair<int, int>> merge_contiguous_memory(std::vector<std::pair<int, int>>& sections) const;
     void copy_exposed_buffer_to_aug_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections);
-    void create_exposed_memory(std::vector<exposed_memory_t>& memory, size_t nsamples, std::vector<long> sample_shape, exposed_memory_attr attr);
+    void create_exposed_memory(std::vector<exposed_memory_t>& memory, size_t nelements, size_t nsamples_per_element, std::vector<long> sample_shape, exposed_memory_attr attr);
     void populate_rehearsal_buffer(const queue_item_t& batch);
     void update_representative_weights(const queue_item_t& batch, int num_representatives);
 

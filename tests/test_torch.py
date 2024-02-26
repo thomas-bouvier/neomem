@@ -631,7 +631,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_flyweight_derpp_buffer(self):
-        self.skipTest("skip") # validated
+        #self.skipTest("skip") # validated
 
         # num_classes
         K = 100

@@ -127,6 +127,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
         init_receiving_rdma_buffer(
             m_server_mems,
             m_client_mems,
+            m_R,
             num_samples_per_representative,
             representative_shape
         );
@@ -147,12 +148,14 @@ distributed_stream_loader_t::distributed_stream_loader_t(
         init_receiving_rdma_buffer(
             m_server_activations_mem,
             m_client_activations_mem,
+            m_R_distillation,
             m_num_samples_per_activation,
             activation_shape
         );
         init_receiving_rdma_buffer(
             m_server_activations_rep_mem,
             m_client_activations_rep_mem,
+            m_R_distillation,
             1,
             representative_shape
         );
@@ -233,7 +236,7 @@ void distributed_stream_loader_t::init_rehearsal_buffers(
  * - the buffer strategy, NoBuffer, CPUBuffer or CUDABuffer
  */
 void distributed_stream_loader_t::init_receiving_rdma_buffer(
-    std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nsamples, std::vector<long> sample_shape)
+    std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nelements, size_t nsamples_per_element, std::vector<long> sample_shape)
 {
     nvtx3::scoped_range nvtx{"init_receiving_rdma_buffer"};
 
@@ -254,7 +257,7 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer(
     struct exposed_memory_attr server_attr;
     memset(&server_attr, 0, sizeof(server_attr));
     server_attr.bulk_mode = tl::bulk_mode::read_only;
-    create_exposed_memory(server_mems, nsamples, sample_shape, server_attr);
+    create_exposed_memory(server_mems, nelements, nsamples_per_element, sample_shape, server_attr);
 
     if (verbose)
         DBG("[" << m_provider_id << "] Server mems initialized!");
@@ -264,7 +267,7 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer(
     memset(&client_attr, 0, sizeof(client_attr));
     client_attr.cuda = buffer_strategy == CUDABuffer;
     client_attr.bulk_mode = tl::bulk_mode::write_only;
-    create_exposed_memory(client_mems, nsamples, sample_shape, client_attr);
+    create_exposed_memory(client_mems, nelements, nsamples_per_element, sample_shape, client_attr);
 
     if (verbose)
         DBG("[" << m_provider_id << "] Client mems initialized!");
@@ -274,12 +277,12 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer(
  * Create `exposed_memory_t` objects.
  */
 void distributed_stream_loader_t::create_exposed_memory(
-        std::vector<exposed_memory_t>& exposed_memory, size_t nsamples, std::vector<long> sample_shape, exposed_memory_attr attr)
+        std::vector<exposed_memory_t>& exposed_memory, size_t nelements, size_t nsamples_per_element, std::vector<long> sample_shape, exposed_memory_attr attr)
 {
     auto nbytes = 4 * std::accumulate(sample_shape.begin(), sample_shape.end(), 1, std::multiplies<int>());
-    sample_shape.insert(sample_shape.begin(), m_R);
+    sample_shape.insert(sample_shape.begin(), nelements);
 
-    for (size_t r = 0; r < nsamples; r++) {
+    for (size_t r = 0; r < nsamples_per_element; r++) {
         exposed_memory_t memory;
 
         auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
@@ -300,7 +303,7 @@ void distributed_stream_loader_t::create_exposed_memory(
         else
             hg_attr.mem_type = (hg_mem_type_t) HG_MEM_TYPE_HOST;
 
-        memory.segments.emplace_back(memory.buffer->data_ptr(), m_R * nbytes);
+        memory.segments.emplace_back(memory.buffer->data_ptr(), nelements * nbytes);
         memory.bulk = get_engine().expose(memory.segments, attr.bulk_mode, hg_attr);
 
         exposed_memory.emplace_back(std::move(memory));
