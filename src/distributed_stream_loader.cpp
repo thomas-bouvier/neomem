@@ -1052,9 +1052,10 @@ void distributed_stream_loader_t::get_remote_activations(
                     m_streams[3]
                 ));
             }
+            const int index = m_num_samples_per_representative * reprs_indices[i];
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
                 (char *) m_server_activations_rep_mem[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
-                m_rehearsal_representatives->index({reprs_indices[i]}).data_ptr(),
+                m_rehearsal_representatives->index({index}).data_ptr(),
                 m_num_bytes_per_representative,
                 cudaMemcpyDefault,
                 m_streams[3]
@@ -1068,9 +1069,11 @@ void distributed_stream_loader_t::get_remote_activations(
                     m_num_bytes_per_activation
                 );
             }
+            // Copying the first representative only.
+            const int index = m_num_samples_per_representative * reprs_indices[i];
             std::memcpy(
                 (char *) m_server_activations_rep_mem[0].buffer->data_ptr() + m_num_bytes_per_representative * o,
-                m_rehearsal_representatives->index({reprs_indices[i]}).data_ptr(),
+                m_rehearsal_representatives->index({index}).data_ptr(),
                 m_num_bytes_per_representative
             );
 #endif

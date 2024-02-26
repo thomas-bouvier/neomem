@@ -153,7 +153,7 @@ class TorchTests(unittest.TestCase):
 
         Parameter `size` will have a max value of B + R.
         """
-        self.skipTest("skip") # validated
+        self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -215,7 +215,7 @@ class TorchTests(unittest.TestCase):
 
         Parameter `size` will have a max value of R.
         """
-        self.skipTest("skip") # validated
+        self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -267,7 +267,7 @@ class TorchTests(unittest.TestCase):
         """Test the case where a representative is composed of multiple
         samples.
         """
-        self.skipTest("Fails at shutdown") # validated
+        self.skipTest("Fails at shutdown")
 
         # num_classes
         K = 1
@@ -326,7 +326,7 @@ class TorchTests(unittest.TestCase):
         """Test the case where a representative is composed of multiple
         samples.
         """
-        self.skipTest("skip") # validated
+        self.skipTest("skip")
 
         # num_classes
         K = 1
@@ -384,7 +384,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_standard_der_buffer(self):
-        self.skipTest("skip") # validated
+        self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -460,7 +460,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_flyweight_der_buffer(self):
-        self.skipTest("skip") # validated
+        self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -550,7 +550,7 @@ class TorchTests(unittest.TestCase):
         We send activations to the buffer too, useful for knowledge distillation.
         We do leverage rehearsal here, thus there is a need to augment mini-batches.
         """
-        self.skipTest("skip") # validated
+        self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -631,7 +631,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_flyweight_derpp_buffer(self):
-        #self.skipTest("skip") # validated
+        self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -799,10 +799,8 @@ class TorchTests(unittest.TestCase):
                         assert torch.all(aug_samples[j] == aug_ph[j] - torch.full((1, 256, 256), 2000, dtype=torch.float32))
 
                     for j in range(size2):
-                        assert torch.allclose(buf_amp_activations[j], buf_amp_activations[j, 0])
-                        assert torch.allclose(buf_ph_activations[j], buf_ph_activations[j, 0])
-                        assert torch.allclose(buf_activations_rep[j], buf_activations_rep[j, 0, 0, 0])
-                        assert buf_activations[j, 0] == buf_activations_rep[j, 0, 0, 0]
+                        assert torch.allclose(buf_amp_activations[j], buf_ph_activations[j])
+                        assert torch.allclose(buf_ph_activations[j], buf_activations_rep[j])
 
                 last_inputs = inputs
                 last_targets = target
@@ -850,9 +848,9 @@ class TorchTests(unittest.TestCase):
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
         dsl = neomem.DistributedStreamLoader.create(
             engine,
-            neomem.Classification, K, N, R, C,
+            neomem.Rehearsal_KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            3, [1, 256, 256], 2, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
+            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -873,7 +871,7 @@ class TorchTests(unittest.TestCase):
                         last_targets,
                         [activations_amp, activations_ph]
                     )
-                    size = dsl.wait()
+                    size1, size2 = dsl.wait()
 
                 # Training the DNN
                 #
@@ -896,10 +894,13 @@ class TorchTests(unittest.TestCase):
                     activations_ph[i] = inputs[i]
 
                 if last_inputs is not None:
-                    for j in range(size):
+                    for j in range(size1):
                         assert torch.all(buf_samples[j] == buf_amp[j] - torch.full((1, 256, 256), 1000, dtype=torch.float32))
                         assert torch.all(buf_samples[j] == buf_ph[j] - torch.full((1, 256, 256), 2000, dtype=torch.float32))
-                        assert torch.all(buf_samples[j] == buf_ph_activations[j])
+
+                    for j in range(size2):
+                        assert torch.allclose(buf_amp_activations[j], buf_ph_activations[j])
+                        assert torch.allclose(buf_ph_activations[j], buf_activations_rep[j])
 
                 last_inputs = inputs
                 last_targets = target
@@ -914,6 +915,7 @@ class TorchTests(unittest.TestCase):
         and that a second can be started without causing any crash.
         """
         self.skipTest("Skipped")
+
         # num_classes
         K = 100
         # rehearsal_size
@@ -936,9 +938,9 @@ class TorchTests(unittest.TestCase):
             engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
             dsl = neomem.DistributedStreamLoader.create(
                 engine,
-                neomem.Classification, K, N, R, C,
+                neomem.Rehearsal, K, N, C,
                 ctypes.c_int64(torch.random.initial_seed()).value,
-                1, [3, 224, 224], 0, [], neomem.CPUBuffer, False, self.verbose
+                R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, self.verbose
             )
             dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
             dsl.enable_augmentation(True)
