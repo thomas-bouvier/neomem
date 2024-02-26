@@ -3,8 +3,10 @@
 
 #include "engine_loader.hpp"
 #include "exposed_memory.hpp"
+#include "debug.hpp"
 #include "queue_item.hpp"
 #include "metrics.hpp"
+#include "rpc_response.hpp"
 
 #include <torch/extension.h>
 #include <thallium.hpp>
@@ -51,8 +53,9 @@ public:
 
     void accumulate(const std::vector<torch::Tensor>& representatives, const torch::Tensor& targets, const std::vector<torch::Tensor>& activations);
     void accumulate(const std::vector<torch::Tensor>& representatives, const torch::Tensor& targets, const std::vector<torch::Tensor>& activations,
-            const std::vector<torch::Tensor>& aug_representatives, const torch::Tensor& aug_targets, const torch::Tensor& aug_weights,
-            const std::vector<torch::Tensor>& buf_activations, const torch::Tensor& buf_activations_rep);
+        const std::vector<torch::Tensor>& aug_representatives, const torch::Tensor& aug_targets, const torch::Tensor& aug_weights,
+        const std::vector<torch::Tensor>& buf_activations, const torch::Tensor& buf_activations_rep
+    );
 
     std::tuple<int, int> wait();
 
@@ -80,11 +83,11 @@ protected:
 
     //---------------------------------Will be moved to buffer class
     Task m_task_type;
-    unsigned int K, N, C, m_R, m_R_distillation;
+    unsigned int K, N, C;
     std::default_random_engine rand_gen;
-    unsigned int m_num_samples_per_representative, m_num_bytes_per_representative;
+    unsigned int m_R, m_num_samples_per_representative, m_num_bytes_per_representative;
     std::vector<long> representative_shape;
-    unsigned int m_num_samples_per_activation, m_num_bytes_per_activation;
+    unsigned int m_R_distillation, m_num_samples_per_activation, m_num_bytes_per_activation;
     std::vector<long> m_activation_shape;
     BufferStrategy buffer_strategy = NoBuffer;
     bool verbose;
@@ -163,7 +166,7 @@ protected:
         const std::vector<int>& indices, int offset
     );
 
-    std::vector<std::vector<std::tuple<int, float, size_t, size_t>>> metadata;
+    std::vector<std::vector<rpc_response_t>> metadata;
 };
 
 #endif

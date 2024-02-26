@@ -7,7 +7,6 @@
 #include <tuple>
 #include <utility>
 
-#include <cereal/types/string.hpp>
 #include <nvtx3/nvtx3.hpp>
 #include <thallium/serialization/stl/tuple.hpp>
 #include <thallium/serialization/stl/vector.hpp>
@@ -500,7 +499,7 @@ void distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> 
     if (verbose)
         DBG("[" << m_provider_id << "] Dispatching rpcs");
 
-
+    size_t nindices = 0;
     if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
         std::vector<tl::bulk> client_bulks;
         for (size_t i = 0; i < m_client_mems.size(); i++) {
@@ -522,7 +521,7 @@ void distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> 
             // Valid because the offset and num_bytes_per_representative are equal for each sample (including amp and ph)
             offset += indices.second.size();
         }
-        ASSERT(responses.size() == representatives_indices_per_node.size());
+        nindices += representatives_indices_per_node.size();
     }
 
     if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
@@ -548,8 +547,10 @@ void distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> 
             // Valid because the offset and num_bytes_per_representative are equal for each sample (including amp and ph)
             offset += indices.second.size();
         }
-        ASSERT(responses.size() == activations_indices_per_node.size());
+        nindices += activations_indices_per_node.size();
     }
+
+    ASSERT(responses.size() == nindices);
 
     m_metrics[i_batch].bulk_prepare_time = 0;
 }
@@ -568,50 +569,44 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
     // first element is the memory offset, second is the number of bytes
     std::vector<std::pair<int, int>> memory_sections;
 
-    for (size_t i = 0; i < responses.size(); i++) {
+    for (auto& response : responses) {
         // Waiting for rpcs to complete, careful to keep the order!
-        std::vector<std::tuple<int, float, size_t, size_t>> m = responses[i].wait();
         // Store metadata so that it lives long enough for CUDA async transfers
-        metadata.push_back(m);
+        metadata.emplace_back(response.wait());
 
-        for (const auto &it : metadata.back()) {
-            const int* label = &std::get<0>(it);
-            const float* weight = &std::get<1>(it);
-            const size_t* num_targets = &std::get<2>(it);
-            const size_t* offset = &std::get<3>(it);
+        for (const rpc_response_t& it : metadata.back()) {
+            if (it.m_type == RPCResponseType::Representative) {
+                if (it.m_num_elements > 0) {
+                    memory_sections.emplace_back(it.m_offset, it.m_num_elements);
+                }
 
-            if (*num_targets > 0) {
-                memory_sections.emplace_back(*offset, *num_targets);
-            }
-
-            if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
-                for (size_t j = 0; j < *num_targets; j++) {
+                for (size_t j = 0; j < it.m_num_elements; j++) {
 #ifndef WITHOUT_CUDA
                     CHECK_CUDA_ERROR(cudaMemcpyAsync(
                         // no * batch.element_size() as type is given
                         m_buf_targets->data_ptr<long int>() + batch.aug_size,
-                        label,
-                        sizeof(*label),
+                        &it.m_label,
+                        sizeof(it.m_label),
                         cudaMemcpyDefault,
                         m_streams[0]
                     ));
                     CHECK_CUDA_ERROR(cudaMemcpyAsync(
                         m_buf_weights->data_ptr<float>() + batch.aug_size,
-                        weight,
-                        sizeof(*weight),
+                        &it.m_weight,
+                        sizeof(it.m_weight),
                         cudaMemcpyDefault,
                         m_streams[0]
                     ));
 #else
-                    m_buf_targets->index_put_({batch.aug_size}, *label);
-                    m_buf_weights->index_put_({batch.aug_size}, *weight);
+                    m_buf_targets->index_put_({batch.aug_size}, it.m_label);
+                    m_buf_weights->index_put_({batch.aug_size}, it.m_weight);
 #endif
                     batch.aug_size++;
                 }
-            }
-
-            if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
-                batch.activations_size++;
+            } else if (it.m_type == RPCResponseType::Activation) {
+                for (size_t j = 0; j < it.m_num_elements; j++) {
+                    batch.activations_size++;
+                }
             }
         }
     }
@@ -943,22 +938,22 @@ void distributed_stream_loader_t::get_remote_representatives(
 
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
-    int o = 0;
-    std::vector<std::tuple<int, float, size_t, size_t>> attached_metadata;
+    size_t o = 0;
+    std::vector<rpc_response_t> attached_metadata;
     for (const auto &el : samples) {
         int label;
         float weight;
         std::vector<int> reprs_indices;
         std::tie(label, weight, reprs_indices) = el;
 
-        attached_metadata.emplace_back(std::make_tuple(label, weight, reprs_indices.size(), offset + o));
+        attached_metadata.emplace_back(rpc_response_t(RPCResponseType::Representative, reprs_indices.size(), offset + o, label, weight));
 
         for (size_t i = 0; i < reprs_indices.size(); i++) {
 #ifndef WITHOUT_CUDA
             for (size_t r = 0; r < m_num_samples_per_representative; r++) {
                 const int index = m_num_samples_per_representative * reprs_indices[i] + r;
                 CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                    (char *) server_mems[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
+                    (char *) m_server_mems[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
                     m_rehearsal_representatives->index({index}).data_ptr(),
                     m_num_bytes_per_representative,
                     cudaMemcpyDefault,
@@ -968,7 +963,11 @@ void distributed_stream_loader_t::get_remote_representatives(
 #else
             for (size_t r = 0; r < m_num_samples_per_representative; r++) {
                 const int index = m_num_samples_per_representative * reprs_indices[i] + r;
-                m_server_mems[r].buffer->index_put_({o}, m_rehearsal_representatives->index({index}));
+                std::memcpy(
+                    (char *) m_server_mems[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
+                    m_rehearsal_representatives->index({index}).data_ptr(),
+                    m_num_bytes_per_representative
+                );
             }
 #endif
             o++;
@@ -1030,25 +1029,47 @@ void distributed_stream_loader_t::get_remote_activations(
 
     std::unique_lock<tl::mutex> lock(rehearsal_mutex);
 
-    int o = 0;
-    std::vector<std::tuple<int, float, size_t, size_t>> attached_metadata;
+    size_t o = 0;
+    std::vector<rpc_response_t> attached_metadata;
     for (const auto &el : samples) {
-        int label;
-        float weight;
         std::vector<int> reprs_indices;
-        std::tie(label, weight, reprs_indices) = el;
+        std::tie(std::ignore, std::ignore, reprs_indices) = el;
 
-        attached_metadata.emplace_back(std::make_tuple(label, weight, reprs_indices.size(), offset + o));
+        attached_metadata.emplace_back(rpc_response_t(RPCResponseType::Activation, reprs_indices.size(), offset + o));
 
         for (size_t i = 0; i < reprs_indices.size(); i++) {
 #ifndef WITHOUT_CUDA
-            // todo
+            for (size_t r = 0; r < m_num_samples_per_activation; r++) {
+                const int index = m_num_samples_per_activation * reprs_indices[i] + r;
+                CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                    (char *) m_server_activations_mem[r].buffer->data_ptr() + m_num_bytes_per_activation * o,
+                    m_rehearsal_activations->index({index}).data_ptr(),
+                    m_num_bytes_per_activation,
+                    cudaMemcpyDefault,
+                    m_streams[2]
+                ));
+            }
+            CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                (char *) m_server_activations_rep_mem[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
+                m_rehearsal_representatives->index({reprs_indices[i]}).data_ptr(),
+                m_num_bytes_per_representative,
+                cudaMemcpyDefault,
+                m_streams[2]
+            ));
 #else
             for (size_t r = 0; r < m_num_samples_per_activation; r++) {
                 const int index = m_num_samples_per_activation * reprs_indices[i] + r;
-                m_server_activations_mem[r].buffer->index_put_({o}, m_rehearsal_activations->index({index}));
+                std::memcpy(
+                    (char *) m_server_activations_mem[r].buffer->data_ptr() + m_num_bytes_per_activation * o,
+                    m_rehearsal_activations->index({index}).data_ptr(),
+                    m_num_bytes_per_activation
+                );
             }
-            m_server_activations_rep_mem[0].buffer->index_put_({o}, m_rehearsal_representatives->index({reprs_indices[i]}));
+            std::memcpy(
+                (char *) m_server_activations_rep_mem[0].buffer->data_ptr() + m_num_bytes_per_representative * o,
+                m_rehearsal_representatives->index({reprs_indices[i]}).data_ptr(),
+                m_num_bytes_per_representative
+            );
 #endif
             o++;
         }
@@ -1233,21 +1254,4 @@ distributed_stream_loader_t::~distributed_stream_loader_t() noexcept
     delete m_rehearsal_representatives;
     if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD)
         delete m_rehearsal_activations;
-}
-
-namespace cereal {
-    template<typename A> void save(A& ar, const torch::Tensor& t)
-    {
-        std::stringstream ss;
-        torch::save(t, ss);
-        ar(ss.str());
-    }
-
-    template<typename A> void load(A& ar, torch::Tensor& t)
-    {
-        std::string s;
-        ar(s);
-        std::stringstream ss(s);
-        torch::load(t, ss);
-    }
 }

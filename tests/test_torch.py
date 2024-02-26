@@ -397,7 +397,7 @@ class TorchTests(unittest.TestCase):
         # batch_size
         B = 32
         # num_representatives used for distillation
-        R_distillation = 16
+        R_distillation = R
 
         buf_activations = torch.zeros(R_distillation, K)
         buf_activations_rep = torch.zeros(R_distillation, 3, 224, 224)
@@ -550,7 +550,7 @@ class TorchTests(unittest.TestCase):
         We send activations to the buffer too, useful for knowledge distillation.
         We do leverage rehearsal here, thus there is a need to augment mini-batches.
         """
-        self.skipTest("skip")
+        self.skipTest("skip") # validated
 
         # num_classes
         K = 100
@@ -581,9 +581,9 @@ class TorchTests(unittest.TestCase):
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
         dsl = neomem.DistributedStreamLoader.create(
             engine,
-            neomem.Classification, K, N, R, C,
+            neomem.Rehearsal_KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 1, [K], neomem.CPUBuffer, False, self.verbose
+            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -602,7 +602,7 @@ class TorchTests(unittest.TestCase):
                         [buf_activations],
                         buf_activations_rep
                     )
-                    size = dsl.wait()
+                    size1, size2 = dsl.wait()
 
                 # Training the DNN
                 #
@@ -610,13 +610,19 @@ class TorchTests(unittest.TestCase):
                 #
                 # kd_output = model(buf_activations_rep[:size])
                 # loss += alpha * (mse(kd_output, buf_activations))
+
                 activations = torch.full((B, K), 42, dtype=torch.float32)
                 for i in range(len(target)):
-                    activations[i] = inputs[i]
+                    activations[i, :] = target[i]
 
                 if last_inputs is not None:
-                    for j in range(B, size):
-                        pass
+                    for j in range(B, size1):
+                        assert torch.all(aug_samples[j] == aug_labels[j])
+
+                    for j in range(size2):
+                        assert torch.allclose(buf_activations[j], buf_activations[j, 0])
+                        assert torch.allclose(buf_activations_rep[j], buf_activations_rep[j, 0, 0, 0])
+                        assert buf_activations[j, 0] == buf_activations_rep[j, 0, 0, 0]
 
                 last_inputs = inputs
                 last_targets = target
@@ -625,7 +631,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_flyweight_derpp_buffer(self):
-        self.skipTest("skip")
+        self.skipTest("skip") # validated
 
         # num_classes
         K = 100
@@ -656,9 +662,9 @@ class TorchTests(unittest.TestCase):
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
         dsl = neomem.DistributedStreamLoader.create(
             engine,
-            neomem.Classification, K, N, R, C,
+            neomem.Rehearsal_KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 1, [K], neomem.CPUBuffer, False, self.verbose
+            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -679,7 +685,7 @@ class TorchTests(unittest.TestCase):
                         last_targets,
                         [activations],
                     )
-                    size = dsl.wait()
+                    size1, size2 = dsl.wait()
 
                 # Training the DNN
                 #
@@ -691,11 +697,16 @@ class TorchTests(unittest.TestCase):
 
                 activations = torch.full((B, K), 42, dtype=torch.float32)
                 for i in range(len(target)):
-                    activations[i] = inputs[i]
+                    activations[i, :] = target[i]
 
                 if last_inputs is not None:
-                    for j in range(size):
-                        pass
+                    for j in range(size1):
+                        assert torch.all(buf_samples[j] == buf_labels[j])
+
+                    for j in range(size2):
+                        assert torch.allclose(buf_activations[j], buf_activations[j, 0])
+                        assert torch.allclose(buf_activations_rep[j], buf_activations_rep[j, 0, 0, 0])
+                        assert buf_activations[j, 0] == buf_activations_rep[j, 0, 0, 0]
 
                 last_inputs = inputs
                 last_targets = target
@@ -741,9 +752,9 @@ class TorchTests(unittest.TestCase):
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
         dsl = neomem.DistributedStreamLoader.create(
             engine,
-            neomem.Classification, K, N, R, C,
+            neomem.Rehearsal_KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            3, [1, 256, 256], 2, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
+            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -762,7 +773,7 @@ class TorchTests(unittest.TestCase):
                         [buf_amp_activations, buf_ph_activations],
                         buf_activations_rep
                     )
-                    size = dsl.wait()
+                    size1, size2 = dsl.wait()
 
                 # Training the DNN
                 #
@@ -783,9 +794,15 @@ class TorchTests(unittest.TestCase):
                     activations_ph[i] = inputs[i]
 
                 if last_inputs is not None:
-                    for j in range(B, size):
+                    for j in range(B, size1):
                         assert torch.all(aug_samples[j] == aug_amp[j] - torch.full((1, 256, 256), 1000, dtype=torch.float32))
                         assert torch.all(aug_samples[j] == aug_ph[j] - torch.full((1, 256, 256), 2000, dtype=torch.float32))
+
+                    for j in range(size2):
+                        assert torch.allclose(buf_amp_activations[j], buf_amp_activations[j, 0])
+                        assert torch.allclose(buf_ph_activations[j], buf_ph_activations[j, 0])
+                        assert torch.allclose(buf_activations_rep[j], buf_activations_rep[j, 0, 0, 0])
+                        assert buf_activations[j, 0] == buf_activations_rep[j, 0, 0, 0]
 
                 last_inputs = inputs
                 last_targets = target
