@@ -55,6 +55,6 @@ ffffffffc09b9620 T ib_register_peer_memory_client       [ib_core]
 You can build a Docker image to run tests leveraging `pytest`.
 
 ```console
-docker compose -f docker-compose.test.yml build test-cpu-openmpi-py3_10-torch1_13_1
-docker run --rm -it neomem-test-cpu-openmpi-py3_10-torch1_13_1 bash -c "cd /neomem/tests && (ls -1 test_torch.py | xargs -n 1 mpirun --allow-run-as-root -np 1 -H localhost:1 bash /pytest.sh)"
+docker compose -f docker-compose.test.yml build test-cpu-openmpi-py3_10-torch2_1_0
+docker run --rm -it neomem-test-cpu-openmpi-py3_10-torch2_1_0 bash -c "cd /neomem/tests && (ls -1 test_torch.py | xargs -n 1 mpirun --allow-run-as-root -np 1 -H localhost:1 bash /pytest.sh)"
 ```

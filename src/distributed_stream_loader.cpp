@@ -83,14 +83,10 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     int mpi_initialized = true;
     MPI_Initialized(&mpi_initialized);
     if (!mpi_initialized) {
-        MPI_Init(NULL, NULL); 
-        //throw std::runtime_error("MPI should be initialized outside of Neomem.");
-    } else {
-        mpi_was_initialized = true;
+        throw std::runtime_error("MPI should be initialized outside of Neomem.");
     }
     MPI_Comm_rank(MPI_COMM_WORLD, &m_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &m_num_workers);
-    m_local_rank = std::atoi(std::getenv("OMPI_COMM_WORLD_LOCAL_RANK"));
 
     // If enabled, get the remote endpoints via the MPI publishing mechanism
     if (discover_endpoints) {
@@ -102,6 +98,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     }
 
 #ifndef WITHOUT_CUDA
+    m_local_rank = std::atoi(std::getenv("OMPI_COMM_WORLD_LOCAL_RANK"));
     int num_devices = 0;
     cudaGetDeviceCount(&num_devices);
     cudaSetDevice(m_local_rank % num_devices);
@@ -109,10 +106,10 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     if (verbose)
         DBG("[" << engine_loader.get_id() << "] Setting CUDA device " << m_local_rank % num_devices);
 
-    CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[0])); // streamNonBlockingSync causes a sync issue
+    // streamNonBlockingSync causes a sync issue
     // To reproduce, use only async copy functions, except in copy_last_batch.
-    CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[1]));
-    CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[2]));
+    for (size_t i = 0; i < m_streams.size(); i++)
+        CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[i]));
 #endif
 
     init_rehearsal_buffers(
@@ -221,7 +218,7 @@ void distributed_stream_loader_t::init_rehearsal_buffers(
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(pin_buffers);
 
     sample_shape.insert(sample_shape.begin(), size);
-    storage = std::make_unique<torch::Tensor>(torch::Tensor(torch::empty(sample_shape, options)));
+    storage = std::make_unique<torch::Tensor>(torch::empty(sample_shape, options));
     ASSERT(storage->is_contiguous());
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 1.0));
     rehearsal_counts.insert(rehearsal_counts.begin(), K, 0);
@@ -352,8 +349,9 @@ void distributed_stream_loader_t::async_process()
         nvtx3::mark("new iteration in async_process");
 
         // An empty batch is a signal for shutdown
-        if (!batch.m_representatives[0].defined())
+        if (batch.m_representatives.size() == 0) {
             break;
+        }
 
         // Initialization of the augmented result, which changes at every
         // iteration with implementation `standard`

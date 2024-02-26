@@ -3,12 +3,12 @@ import os
 import random
 import unittest
 
-import mpi4py
 import neomem
 import numpy as np
 import pytest
 import torch
 
+from mpi4py import MPI
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -22,7 +22,7 @@ class MyDataset(Dataset):
         return tensor, label
 
     def __len__(self):
-        return 5000 # Total number of samples in the dataset
+        return 2500 # Total number of samples in the dataset
 
 class PtychoDataset(Dataset):
     def __getitem__(self, index):
@@ -153,7 +153,7 @@ class TorchTests(unittest.TestCase):
 
         Parameter `size` will have a max value of B + R.
         """
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -215,7 +215,7 @@ class TorchTests(unittest.TestCase):
 
         Parameter `size` will have a max value of R.
         """
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -326,7 +326,7 @@ class TorchTests(unittest.TestCase):
         """Test the case where a representative is composed of multiple
         samples.
         """
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 1
@@ -384,7 +384,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_standard_der_buffer(self):
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -460,7 +460,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_flyweight_der_buffer(self):
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -550,7 +550,7 @@ class TorchTests(unittest.TestCase):
         We send activations to the buffer too, useful for knowledge distillation.
         We do leverage rehearsal here, thus there is a need to augment mini-batches.
         """
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -631,7 +631,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_flyweight_derpp_buffer(self):
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -811,7 +811,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_flyweight_derpp_ptycho_buffer(self):
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 1
@@ -914,7 +914,7 @@ class TorchTests(unittest.TestCase):
         """Test that a single rehearsal buffer can be properly shut down,
         and that a second can be started without causing any crash.
         """
-        self.skipTest("Skipped")
+        #self.skipTest("skip")
 
         # num_classes
         K = 100
