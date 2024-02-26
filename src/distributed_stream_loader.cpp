@@ -116,7 +116,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
 #endif
 
     init_rehearsal_buffers(
-        &m_rehearsal_representatives,
+        m_rehearsal_representatives,
         num_samples_per_representative,
         representative_shape,
         torch::cuda::is_available()
@@ -138,7 +138,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
         m_num_bytes_per_activation = 4 * std::accumulate(activation_shape.begin(), activation_shape.end(), 1, std::multiplies<int>());
 
         init_rehearsal_buffers(
-            &m_rehearsal_activations,
+            m_rehearsal_activations,
             m_num_samples_per_activation,
             activation_shape,
             torch::cuda::is_available()
@@ -213,7 +213,7 @@ void distributed_stream_loader_t::register_endpoints(const std::map<std::string,
  * Initialize
  */
 void distributed_stream_loader_t::init_rehearsal_buffers(
-        torch::Tensor** storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers)
+        std::unique_ptr<torch::Tensor>& storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers)
 {
     nvtx3::scoped_range nvtx{"init_rehearsal_buffer"};
 
@@ -221,8 +221,8 @@ void distributed_stream_loader_t::init_rehearsal_buffers(
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(pin_buffers);
 
     sample_shape.insert(sample_shape.begin(), size);
-    *storage = new torch::Tensor(torch::empty(sample_shape, options));
-    ASSERT((*storage)->is_contiguous());
+    storage = std::make_unique<torch::Tensor>(torch::Tensor(torch::empty(sample_shape, options)));
+    ASSERT(storage->is_contiguous());
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 1.0));
     rehearsal_counts.insert(rehearsal_counts.begin(), K, 0);
 
@@ -293,7 +293,7 @@ void distributed_stream_loader_t::create_exposed_memory(
             options = options.pinned_memory(true);
 #endif
         }
-        memory.buffer = new torch::Tensor(torch::ones(sample_shape, options));
+        memory.buffer = std::make_unique<torch::Tensor>(torch::ones(sample_shape, options));
 
         // Preparing Mercury attributes.
         struct hg_bulk_attr hg_attr;
@@ -1256,8 +1256,4 @@ distributed_stream_loader_t::~distributed_stream_loader_t() noexcept
         cudaStreamDestroy(stream);
     }
 #endif
-
-    delete m_rehearsal_representatives;
-    if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD)
-        delete m_rehearsal_activations;
 }

@@ -715,7 +715,7 @@ class TorchTests(unittest.TestCase):
         engine.wait_for_finalize()
 
     def test_neomem_standard_derpp_ptycho_buffer(self):
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 1

@@ -63,7 +63,7 @@ struct queue_item_t {
         m_weights = torch::ones({size}, aug_weights.options());
     }
 
-    queue_item_t() { }
+    queue_item_t() = default;
 
     size_t get_size() const {
         return size;

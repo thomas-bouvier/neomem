@@ -72,7 +72,7 @@ public:
 protected:
     uint16_t m_provider_id;
 
-    void init_rehearsal_buffers(torch::Tensor** storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
+    void init_rehearsal_buffers(std::unique_ptr<torch::Tensor>& storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
     void init_receiving_rdma_buffer(std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nelements, size_t nsamples_per_element, std::vector<long> sample_shape);
 
     void copy_last_batch(const queue_item_t &batch);
@@ -92,8 +92,8 @@ protected:
     BufferStrategy buffer_strategy = NoBuffer;
     bool verbose;
 
-    torch::Tensor* m_rehearsal_representatives = nullptr;
-    torch::Tensor* m_rehearsal_activations = nullptr;
+    std::unique_ptr<torch::Tensor> m_rehearsal_representatives;
+    std::unique_ptr<torch::Tensor> m_rehearsal_activations;
     std::vector<std::pair<size_t, float>> rehearsal_metadata;
     std::vector<int> rehearsal_counts;
     size_t m_rehearsal_size = 0;
