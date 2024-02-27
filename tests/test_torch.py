@@ -118,7 +118,7 @@ class TorchTests(unittest.TestCase):
         """Test that a single rehearsal buffer can be created using the
         tcp protocol.
         """
-        self.skipTest("skip")
+        #self.skipTest("skip")
 
         # num_classes
         K = 100
@@ -132,9 +132,9 @@ class TorchTests(unittest.TestCase):
         engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
         dsl = neomem.DistributedStreamLoader.create(
             engine,
-            neomem.Classification, K, N, R, C,
+            neomem.Rehearsal, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            1, [3, 224, 224], 0, [], neomem.CPUBuffer, False, self.verbose
+            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -267,7 +267,7 @@ class TorchTests(unittest.TestCase):
         """Test the case where a representative is composed of multiple
         samples.
         """
-        self.skipTest("Fails at shutdown")
+        #self.skipTest("skip")
 
         # num_classes
         K = 1
@@ -281,7 +281,7 @@ class TorchTests(unittest.TestCase):
         B = 32
 
         aug_samples_recon = torch.zeros(B + R, 1, 256, 256)
-        aug_targets_recon = torch.zeros(B + R)
+        aug_targets_recon = torch.zeros(B + R, dtype=torch.int64)
         aug_weights_recon = torch.zeros(B + R)
         aug_amp = torch.zeros(B + R, 1, 256, 256)
         aug_ph = torch.zeros(B + R, 1, 256, 256)
@@ -342,7 +342,7 @@ class TorchTests(unittest.TestCase):
         buf_samples_recon = torch.zeros(R, 1, 256, 256)
         buf_amp = torch.zeros(R, 1, 256, 256)
         buf_ph = torch.zeros(R, 1, 256, 256)
-        buf_targets_recon = torch.zeros(R)
+        buf_targets_recon = torch.zeros(R, dtype=torch.int64)
         buf_weights_recon = torch.zeros(R)
         fake = torch.tensor([1])
 
@@ -533,6 +533,186 @@ class TorchTests(unittest.TestCase):
 
                 last_inputs = inputs
                 last_targets = target
+
+        dsl.finalize()
+        engine.wait_for_finalize()
+
+    def test_neomem_standard_der_ptycho_buffer(self):
+        #self.skipTest("skip")
+
+        # num_classes
+        K = 1
+        # rehearsal_size
+        N = 650
+        # num_candidates
+        C = 20
+        # num_representatives
+        R = 20
+        # batch_size
+        B = 32
+        # num_representatives used for distillation
+        R_distillation = R
+
+        buf_amp_activations = torch.zeros(R_distillation, 1, 256, 256)
+        buf_ph_activations = torch.zeros(R_distillation, 1, 256, 256)
+        buf_activations_rep = torch.zeros(R_distillation, 1, 256, 256)
+        fake = torch.tensor([1])
+
+        last_inputs = None
+        last_targets = None
+        last_amps = None
+        last_phs = None
+        activations_amp = None
+        activations_ph = None
+
+        dataset = PtychoDataset()
+        loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
+
+        engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
+        dsl = neomem.DistributedStreamLoader.create(
+            engine,
+            neomem.KD, K, N, C,
+            ctypes.c_int64(torch.random.initial_seed()).value,
+            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
+        )
+        dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
+        dsl.enable_augmentation(True)
+        dsl.start()
+
+        for _ in range(2):
+            for inputs, target, amp, ph in loader:
+                if last_inputs is not None:
+                    dsl.accumulate(
+                        [last_inputs, last_amps, last_phs],
+                        last_targets,
+                        [activations_amp, activations_ph],
+                        [],
+                        fake,
+                        fake,
+                        [buf_amp_activations, buf_ph_activations],
+                        buf_activations_rep
+                    )
+                    _, size2 = dsl.wait()
+
+                # Training the DNN
+                #
+                # amp_output, ph_output = model(aug_samples[:size])
+                # loss1 = criterion(amp_output, aug_amp)
+                # loss2 = criterion(ph_output, aug_ph)
+                # loss = loss1 + loss2
+                #
+                # amp_kd_output, ph_kd_output = model(buf_activations_rep[:size])
+                # kd_loss1 = mse(amp_kd_output, buf_amp_activations[:size])
+                # kd_loss2 = mse(ph_kd_output, buf_ph_activations[:size])
+                # loss += alpha * (kd_loss1 + kd_loss2)
+
+                activations_amp = torch.full((B, 1, 256, 256), 42, dtype=torch.float32)
+                activations_ph = torch.full((B, 1, 256, 256), 42, dtype=torch.float32)
+                for i in range(len(target)):
+                    activations_amp[i] = inputs[i]
+                    activations_ph[i] = inputs[i]
+
+                if last_inputs is not None:
+                    for j in range(size2):
+                        assert torch.allclose(buf_amp_activations[j], buf_ph_activations[j])
+                        assert torch.allclose(buf_ph_activations[j], buf_activations_rep[j])
+
+                last_inputs = inputs
+                last_targets = target
+                last_amps = amp
+                last_phs = ph
+
+        dsl.finalize()
+        engine.wait_for_finalize()
+
+    def test_neomem_flyweight_der_ptycho_buffer(self):
+        #self.skipTest("skip")
+
+        # num_classes
+        K = 1
+        # rehearsal_size
+        N = 650
+        # num_candidates
+        C = 20
+        # num_representatives
+        R = 20
+        # batch_size
+        B = 32
+        # num_representatives used for distillation
+        R_distillation = R
+
+        buf_amp_activations = torch.zeros(R_distillation, 1, 256, 256)
+        buf_ph_activations = torch.zeros(R_distillation, 1, 256, 256)
+        buf_activations_rep = torch.zeros(R_distillation, 1, 256, 256)
+        fake = torch.tensor([1])
+
+        last_inputs = None
+        last_targets = None
+        last_amps = None
+        last_phs = None
+        activations_amp = None
+        activations_ph = None
+
+        dataset = PtychoDataset()
+        loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
+
+        engine = neomem.EngineLoader("tcp://127.0.0.1:1234", 0, False)
+        dsl = neomem.DistributedStreamLoader.create(
+            engine,
+            neomem.KD, K, N, C,
+            ctypes.c_int64(torch.random.initial_seed()).value,
+            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, self.verbose
+        )
+        dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
+        dsl.enable_augmentation(True)
+        dsl.use_these_allocated_variables(
+            [],
+            fake,
+            fake,
+            [buf_amp_activations, buf_ph_activations],
+            buf_activations_rep
+        )
+        dsl.start()
+
+        for _ in range(2):
+            for inputs, target, amp, ph in loader:
+                if last_inputs is not None:
+                    dsl.accumulate(
+                        [last_inputs, last_amps, last_phs],
+                        last_targets,
+                        [activations_amp, activations_ph]
+                    )
+                    _, size2 = dsl.wait()
+
+                # Training the DNN
+                #
+                # loss = model(inputs)
+                #
+                # amp_output, ph_output = model(buf_samples[:size])
+                # loss1 = criterion(amp_output, buf_amp)
+                # loss2 = criterion(ph_output, buf_ph)
+                # loss += beta * (loss1 + loss2)
+                #
+                # amp_kd_output, ph_kd_output = model(buf_activations_rep[:size])
+                # kd_loss1 = mse(amp_kd_output, buf_amp_activations[:size])
+                # kd_loss2 = mse(ph_kd_output, buf_ph_activations[:size])
+                # loss += alpha * (kd_loss1 + kd_loss2)
+
+                activations_amp = torch.full((B, 1, 256, 256), 42, dtype=torch.float32)
+                activations_ph = torch.full((B, 1, 256, 256), 42, dtype=torch.float32)
+                for i in range(len(target)):
+                    activations_amp[i] = inputs[i]
+                    activations_ph[i] = inputs[i]
+
+                if last_inputs is not None:
+                    for j in range(size2):
+                        assert torch.allclose(buf_amp_activations[j], buf_ph_activations[j])
+                        assert torch.allclose(buf_ph_activations[j], buf_activations_rep[j])
+
+                last_inputs = inputs
+                last_targets = target
+                last_amps = amp
+                last_phs = ph
 
         dsl.finalize()
         engine.wait_for_finalize()
@@ -731,7 +911,7 @@ class TorchTests(unittest.TestCase):
         R_distillation = R
 
         aug_samples = torch.zeros(B + R, 1, 256, 256)
-        aug_targets = torch.zeros(B + R)
+        aug_targets = torch.zeros(B + R, dtype=torch.int64)
         aug_weights = torch.zeros(B + R)
         aug_amp = torch.zeros(B + R, 1, 256, 256)
         aug_ph = torch.zeros(B + R, 1, 256, 256)
@@ -827,7 +1007,7 @@ class TorchTests(unittest.TestCase):
         R_distillation = R
 
         buf_samples = torch.zeros(R, 1, 256, 256)
-        buf_targets = torch.zeros(R)
+        buf_targets = torch.zeros(R, dtype=torch.int64)
         buf_weights = torch.zeros(R)
         buf_amp = torch.zeros(R, 1, 256, 256)
         buf_ph = torch.zeros(R, 1, 256, 256)

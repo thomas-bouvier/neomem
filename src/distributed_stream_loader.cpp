@@ -632,7 +632,7 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
 
     // Copy representatives
     if (buffer_strategy != NoBuffer) {
-        copy_exposed_buffer_to_aug_batch(batch, contiguous_memory_sections);
+        copy_exposed_buffer_to_python_batch(batch, contiguous_memory_sections);
     }
 }
 
@@ -671,9 +671,9 @@ std::vector<std::pair<int, int>> distributed_stream_loader_t::merge_contiguous_m
  * (`batch.aug_samples`)  or has been allocated once at the beginning of the
  * execution (`alloc_aug_samples`).
  */
-void distributed_stream_loader_t::copy_exposed_buffer_to_aug_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections)
+void distributed_stream_loader_t::copy_exposed_buffer_to_python_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections)
 {
-    nvtx3::scoped_range nvtx{"copy_exposed_buffer_to_aug_batch"};
+    nvtx3::scoped_range nvtx{"copy_exposed_buffer_to_python_batch"};
 
     auto cumulated_offset = 0;
     for (const auto& pair : sections) {
@@ -1078,7 +1078,7 @@ void distributed_stream_loader_t::get_remote_activations(
                 const int index = m_num_samples_per_activation * reprs_indices[i] + r;
                 CHECK_CUDA_ERROR(cudaMemcpyAsync(
                     (char *) m_server_activations_mem[r].buffer->data_ptr() + m_num_bytes_per_activation * o,
-                    m_rehearsal_activations->index({index}).data_ptr(),
+                    (char *) m_rehearsal_activations->index({index}).data_ptr(),
                     m_num_bytes_per_activation,
                     cudaMemcpyDefault,
                     m_streams[3]
@@ -1087,7 +1087,7 @@ void distributed_stream_loader_t::get_remote_activations(
             const int index = m_num_samples_per_representative * reprs_indices[i];
             CHECK_CUDA_ERROR(cudaMemcpyAsync(
                 (char *) m_server_activations_rep_mem[0].buffer->data_ptr() + m_num_bytes_per_representative * o,
-                m_rehearsal_representatives->index({index}).data_ptr(),
+                (char *) m_rehearsal_representatives->index({index}).data_ptr(),
                 m_num_bytes_per_representative,
                 cudaMemcpyDefault,
                 m_streams[3]
