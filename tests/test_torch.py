@@ -930,6 +930,7 @@ class TorchTests(unittest.TestCase):
         aug_samples = torch.zeros(B + R, 3, 224, 224)
         aug_labels = torch.randint(high=K, size=(B + R,))
         aug_weights = torch.zeros(B + R)
+        fake = torch.tensor([1])
 
         dataset = MyDataset(K)
         loader = DataLoader(dataset=dataset, batch_size=B, shuffle=True)
@@ -947,7 +948,7 @@ class TorchTests(unittest.TestCase):
             dsl.start()
 
             for inputs, target in loader:
-                dsl.accumulate(inputs, target, aug_samples, aug_labels, aug_weights)
+                dsl.accumulate([inputs], target, [], [aug_samples], aug_labels, aug_weights, [], fake)
                 dsl.wait()
 
             dsl.finalize()
