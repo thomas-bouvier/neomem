@@ -429,14 +429,14 @@ void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch)
         ));
     }
     CHECK_CUDA_ERROR(cudaMemcpyAsync(
-        (char *) batch.aug_targets.data_ptr(),
+        (char *) batch.m_aug_targets.data_ptr(),
         batch.m_targets.data_ptr(),
         batch.get_size() * batch.m_targets.element_size(),
         cudaMemcpyDefault,
         m_streams[0]
     ));
     CHECK_CUDA_ERROR(cudaMemcpyAsync(
-        (char *) batch.aug_weights.data_ptr(),
+        (char *) batch.m_aug_weights.data_ptr(),
         batch.m_weights.data_ptr(),
         batch.get_size() * batch.m_weights.element_size(),
         cudaMemcpyDefault,
