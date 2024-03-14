@@ -35,7 +35,7 @@ private:
         unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
         unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
         BufferStrategy buffer_strategy,
-        bool discover_endpoints = false, bool verbose = false
+        bool discover_endpoints = false, bool half_precision = false, bool verbose = false
     );
     
 public:
@@ -43,7 +43,7 @@ public:
         unsigned int K, unsigned int N, unsigned int C, int64_t seed,
         unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
         unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-        BufferStrategy buffer_strategy, bool discover_endpoints, bool verbose
+        BufferStrategy buffer_strategy, bool discover_endpoints, bool half_precision, bool verbose
     );
     ~distributed_stream_loader_t() noexcept;
     void finalize();
@@ -90,7 +90,8 @@ protected:
     unsigned int m_R_distillation, m_num_samples_per_activation, m_num_bytes_per_activation;
     std::vector<long> m_activation_shape;
     BufferStrategy buffer_strategy = NoBuffer;
-    bool verbose;
+    bool m_half_precision;
+    bool m_verbose;
 
     std::unique_ptr<torch::Tensor> m_rehearsal_representatives;
     std::unique_ptr<torch::Tensor> m_rehearsal_activations;

@@ -53,13 +53,13 @@ distributed_stream_loader_t::distributed_stream_loader_t(
         unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
         unsigned int R, unsigned int num_samples_per_representative, std::vector<long> _representative_shape,
         unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-        BufferStrategy _buffer_strategy, bool discover_endpoints, bool _verbose)
+        BufferStrategy _buffer_strategy, bool discover_endpoints, bool half_precision, bool verbose)
               : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id()),
                 m_provider_id(_engine_loader.get_id()),
                 m_task_type(task_type), K(_K), N(_N), C(_C), rand_gen(seed),
                 m_R(R), m_num_samples_per_representative(num_samples_per_representative), representative_shape(_representative_shape),
                 m_R_distillation(R_distillation), m_num_samples_per_activation(num_samples_per_activation), m_activation_shape(activation_shape),
-                buffer_strategy(_buffer_strategy), verbose(_verbose)
+                buffer_strategy(_buffer_strategy), m_half_precision(half_precision), m_verbose(verbose)
 {
     m_num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
 
@@ -74,7 +74,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     // Setup a finalization callback for this provider, in case it is
     // still alive when the engine is finalized.
     get_engine().push_finalize_callback(this, [p=this]() {
-        if (p->verbose)
+        if (p->m_verbose)
             DBG("[" << p->m_provider_id << "] Shutting down current provider...");
         delete p;
     });
@@ -103,7 +103,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     cudaGetDeviceCount(&num_devices);
     cudaSetDevice(m_local_rank % num_devices);
 
-    if (verbose)
+    if (m_verbose)
         DBG("[" << engine_loader.get_id() << "] Setting CUDA device " << m_local_rank % num_devices);
 
     // streamNonBlockingSync causes a sync issue
@@ -132,7 +132,13 @@ distributed_stream_loader_t::distributed_stream_loader_t(
 
     if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
         ASSERT(m_num_samples_per_activation > 0);
-        m_num_bytes_per_activation = 4 * std::accumulate(activation_shape.begin(), activation_shape.end(), 1, std::multiplies<int>());
+        // This should be changed to float32 if not training in half precision!
+        m_num_bytes_per_activation = std::accumulate(activation_shape.begin(), activation_shape.end(), 1, std::multiplies<int>());
+        if (m_half_precision) {
+            m_num_bytes_per_activation *= 2;
+        } else {
+            m_num_bytes_per_activation *= 4;
+        }
 
         init_rehearsal_buffers(
             m_rehearsal_activations,
@@ -167,13 +173,13 @@ distributed_stream_loader_t::distributed_stream_loader_t(
         unsigned int K, unsigned int N, unsigned int C, int64_t seed,
         unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
         unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-        BufferStrategy buffer_strategy, bool discover_endpoints, bool verbose)
+        BufferStrategy buffer_strategy, bool discover_endpoints, bool half_precision, bool verbose)
 {
     return new distributed_stream_loader_t(
         engine_loader, task_type, K, N, C, seed,
         R, num_samples_per_representative, representative_shape,
         R_distillation, num_samples_per_activation, activation_shape,
-        buffer_strategy, discover_endpoints, verbose
+        buffer_strategy, discover_endpoints, half_precision, verbose
     );
 }
 
@@ -223,7 +229,7 @@ void distributed_stream_loader_t::init_rehearsal_buffers(
     rehearsal_metadata.insert(rehearsal_metadata.begin(), K, std::make_pair(0, 1.0));
     rehearsal_counts.insert(rehearsal_counts.begin(), K, 0);
 
-    if (verbose)
+    if (m_verbose)
         DBG("[" << m_provider_id << "] Distributed buffer memory allocated!");
 }
 
@@ -256,7 +262,7 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer(
     server_attr.bulk_mode = tl::bulk_mode::read_only;
     create_exposed_memory(server_mems, nelements, nsamples_per_element, sample_shape, server_attr);
 
-    if (verbose)
+    if (m_verbose)
         DBG("[" << m_provider_id << "] Server mems initialized!");
 
     // Initializing client bulk
@@ -266,7 +272,7 @@ void distributed_stream_loader_t::init_receiving_rdma_buffer(
     client_attr.bulk_mode = tl::bulk_mode::write_only;
     create_exposed_memory(client_mems, nelements, nsamples_per_element, sample_shape, client_attr);
 
-    if (verbose)
+    if (m_verbose)
         DBG("[" << m_provider_id << "] Client mems initialized!");
 }
 
@@ -306,7 +312,7 @@ void distributed_stream_loader_t::create_exposed_memory(
         exposed_memory.emplace_back(std::move(memory));
     }
 
-    if (verbose)
+    if (m_verbose)
         DBG("[" << m_provider_id << "] Initialized " << nsamples << " exposed memory regions!");
 }
 
@@ -343,7 +349,7 @@ void distributed_stream_loader_t::async_process()
         request_queue.pop_front();
         lock.unlock();
 
-        if (verbose)
+        if (m_verbose)
             DBG("[" << m_provider_id << "] Consuming a batch!");
 
         nvtx3::mark("new iteration in async_process");
@@ -414,7 +420,7 @@ void distributed_stream_loader_t::async_process()
 void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch)
 {
     nvtx3::scoped_range nvtx{"copy_last_batch"};
-    if (verbose)
+    if (m_verbose)
         DBG("[" << m_provider_id << "] Copying last batch!");
 
     // Copy incoming samples into the next augmented minibatch
@@ -497,7 +503,7 @@ void distributed_stream_loader_t::augment_batch(queue_item_t &batch)
  */
 void distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> &responses)
 {
-    if (verbose)
+    if (m_verbose)
         DBG("[" << m_provider_id << "] Dispatching rpcs");
 
     size_t nindices = 0;
@@ -563,7 +569,7 @@ void distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> 
  */
 void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& responses, queue_item_t &batch)
 {
-    if (verbose)
+    if (m_verbose)
         DBG("[" << m_provider_id << "] Resolving rpcs...");
 
     // Sequence of integers representing sections that have been written,
@@ -821,7 +827,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
             for (size_t k = 0; k < m_num_samples_per_activation; k++) {
                 CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                    (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * (batch.m_activations.size() * j + k),
+                    (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * (m_num_samples_per_activation * j + k),
                     (char *) batch.m_activations[k].data_ptr() + m_num_bytes_per_activation * i,
                     m_num_bytes_per_activation,
                     cudaMemcpyDefault,
@@ -840,7 +846,7 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
             for (size_t k = 0; k < m_num_samples_per_activation; k++) {
                 std::memcpy(
-                    (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * (batch.m_activations.size() * j + k),
+                    (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * (m_num_samples_per_activation * j + k),
                     (char *) batch.m_activations[k].data_ptr() + m_num_bytes_per_activation * i,
                     m_num_bytes_per_activation
                 );
@@ -965,7 +971,7 @@ void distributed_stream_loader_t::get_remote_representatives(
     std::vector<std::tuple<size_t, float, std::vector<int>>> samples = get_actual_rehearsal_indices(indices);
     const size_t nrepresentatives = count_samples(samples);
 
-    if (verbose && nrepresentatives > 0) {
+    if (m_verbose && nrepresentatives > 0) {
         std::cout << "[" << m_provider_id << "] Sending " << nrepresentatives << "/" << indices.size()  << " representatives from "
             << samples.size() << " different classes to remote node (endpoint: "
             << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_bulks.size() << " client bulks)" << std::endl;
@@ -1056,7 +1062,7 @@ void distributed_stream_loader_t::get_remote_activations(
     std::vector<std::tuple<size_t, float, std::vector<int>>> samples = get_actual_rehearsal_indices(indices);
     const size_t nactivations = count_samples(samples);
 
-    if (verbose && nactivations > 0) {
+    if (m_verbose && nactivations > 0) {
         std::cout << "[" << m_provider_id << "] Sending " << nactivations << "/" << indices.size()  << " activations and associated representatives from "
             << samples.size() << " different classes to remote node (endpoint: "
             << req.get_endpoint() << ", writing at offset " << offset << " for all " << client_activations_bulks.size() << " client activation bulks)" << std::endl;
@@ -1267,7 +1273,7 @@ void distributed_stream_loader_t::finalize()
     lock.unlock();
     request_cond.notify_one();
 
-    if (verbose)
+    if (m_verbose)
         DBG("[" << m_provider_id << "] Finalize signal sent...");
 }
 

@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
     engine_loader_t engine(server_address, server_id);
     distributed_stream_loader_t* dsl = distributed_stream_loader_t::create(
         engine, REHEARSAL, K, N, C, seed,
-        R, 1, {3, 224, 224}, 0, 0, {}, CPUBuffer, discover_endpoints, true
+        R, 1, {3, 224, 224}, 0, 0, {}, CPUBuffer, discover_endpoints, false, true
     );
     if (manual_endpoints) {
         dsl->register_endpoints(endpoints);
