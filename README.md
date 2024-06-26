@@ -58,3 +58,23 @@ You can build a Docker image to run tests leveraging `pytest`.
 docker compose -f docker-compose.test.yml build test-cpu-openmpi-py3_10-torch2_1_0
 docker run --rm -it neomem-test-cpu-openmpi-py3_10-torch2_1_0 bash -c "cd /neomem/tests && (ls -1 test_torch.py | xargs -n 1 mpirun --allow-run-as-root -np 1 -H localhost:1 bash /pytest.sh)"
 ```
+
+# Citation
+
+```
+@inproceedings{bouvier:hal-04600107,
+  TITLE = {{Efficient Data-Parallel Continual Learning with Asynchronous Distributed Rehearsal Buffers}},
+  AUTHOR = {Bouvier, Thomas and Nicolae, Bogdan and Chaugier, Hugo and Costan, Alexandru and Foster, Ian and Antoniu, Gabriel},
+  URL = {https://inria.hal.science/hal-04600107},
+  BOOKTITLE = {{CCGrid 2024 - IEEE 24th International Symposium on Cluster, Cloud and Internet Computing}},
+  ADDRESS = {Philadelphia (PA), United States},
+  PAGES = {1-10},
+  YEAR = {2024},
+  MONTH = May,
+  DOI = {10.1109/CCGrid59990.2024.00036},
+  KEYWORDS = {continual learning ; data-parallel training ; experience replay ; distributed rehearsal buffers ; asynchronous data management ; scalability},
+  PDF = {https://inria.hal.science/hal-04600107/file/paper.pdf},
+  HAL_ID = {hal-04600107},
+  HAL_VERSION = {v1},
+}
+```
