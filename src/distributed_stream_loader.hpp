@@ -42,6 +42,7 @@ struct Config {
     std::vector<long> activation_shape;
     BufferStrategy buffer_strategy;
     bool discover_endpoints;
+    bool global_sampling;
     bool half_precision;
     bool verbose;
 };
@@ -55,8 +56,7 @@ public:
         unsigned int K, unsigned int N, unsigned int C, int64_t seed,
         unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
         unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-        BufferStrategy buffer_strategy, bool discover_endpoints, bool half_precision, bool verbose
-    );
+        BufferStrategy buffer_strategy, bool discover_endpoints, bool global_sampling, bool half_precision, bool verbose);
     ~distributed_stream_loader_t() noexcept;
     void finalize();
 
@@ -109,6 +109,7 @@ protected:
     unsigned int m_R_distillation, m_num_samples_per_activation, m_num_bytes_per_activation;
     std::vector<long> m_activation_shape;
     BufferStrategy buffer_strategy = NoBuffer;
+    bool m_global_sampling;
     bool m_half_precision;
     bool m_verbose;
 
@@ -167,7 +168,7 @@ protected:
     void populate_rehearsal_buffer(const queue_item_t& batch);
     void update_representative_weights(const queue_item_t& batch, int num_representatives);
 
-    std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives);
+    std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives, bool global_sampling);
 
     int count_samples(const std::vector<std::tuple<size_t, float, std::vector<int>>>& samples) const;
     std::vector<std::tuple<size_t, float, std::vector<int>>> get_actual_rehearsal_indices(const std::vector<int>& indices) const;

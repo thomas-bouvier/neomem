@@ -85,7 +85,7 @@ class TorchTests(unittest.TestCase):
             engine1,
             neomem.Rehearsal, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, False, True
+            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, True, False, True
         )
 
         engine2 = neomem.EngineLoader("tcp://127.0.0.1:1235", 1, False)
@@ -93,7 +93,7 @@ class TorchTests(unittest.TestCase):
             engine2,
             neomem.Rehearsal, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, False, True
+            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, True, False, True
         )
 
         dsl1.register_endpoints({'tcp://127.0.0.1:1234': 0, 'tcp://127.0.0.1:1235': 1})
@@ -134,7 +134,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Rehearsal, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, False, self.verbose
+            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -179,7 +179,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Rehearsal, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, False, self.verbose
+            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -241,7 +241,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Rehearsal, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, False, self.verbose
+            R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -295,7 +295,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Rehearsal, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 3, [1, 256, 256], 0, 0, [], neomem.CPUBuffer, False, False, self.verbose
+            R, 3, [1, 256, 256], 0, 0, [], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -354,7 +354,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Rehearsal, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 3, [1, 256, 256], 0, 0, [], neomem.CPUBuffer, False, False, self.verbose
+            R, 3, [1, 256, 256], 0, 0, [], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -415,7 +415,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, False, self.verbose
+            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -491,7 +491,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, False, self.verbose
+            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -573,7 +573,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, False, self.verbose
+            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -661,7 +661,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, False, self.verbose
+            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -763,7 +763,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Rehearsal_KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, False, self.verbose
+            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -844,7 +844,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Rehearsal_KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, False, self.verbose
+            R, 1, [3, 224, 224], R_distillation, 1, [K], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -934,7 +934,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Rehearsal_KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, False, self.verbose
+            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -1030,7 +1030,7 @@ class TorchTests(unittest.TestCase):
             engine,
             neomem.Rehearsal_KD, K, N, C,
             ctypes.c_int64(torch.random.initial_seed()).value,
-            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, False, self.verbose
+            R, 3, [1, 256, 256], R_distillation, 2, [1, 256, 256], neomem.CPUBuffer, False, True, False, self.verbose
         )
         dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
         dsl.enable_augmentation(True)
@@ -1121,7 +1121,7 @@ class TorchTests(unittest.TestCase):
                 engine,
                 neomem.Rehearsal, K, N, C,
                 ctypes.c_int64(torch.random.initial_seed()).value,
-                R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, False, self.verbose
+                R, 1, [3, 224, 224], 0, 0, [], neomem.CPUBuffer, False, True, False, self.verbose
             )
             dsl.register_endpoints({"tcp://127.0.0.1:1234": 0})
             dsl.enable_augmentation(True)

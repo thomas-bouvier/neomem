@@ -46,7 +46,7 @@ void checkLast(const char* const file, const int line) {
         unsigned int K, unsigned int N, unsigned int C, int64_t seed,
         unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
         unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-        BufferStrategy buffer_strategy, bool discover_endpoints, bool half_precision, bool verbose)
+        BufferStrategy buffer_strategy, bool discover_endpoints, bool global_sampling, bool half_precision, bool verbose)
 {
     Config config {
         task_type,
@@ -62,6 +62,7 @@ void checkLast(const char* const file, const int line) {
         std::move(activation_shape),
         buffer_strategy,
         discover_endpoints,
+        global_sampling,
         half_precision,
         verbose
     };
@@ -95,6 +96,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     , m_num_samples_per_activation(config.num_samples_per_activation)
     , m_activation_shape(config.activation_shape)
     , buffer_strategy(config.buffer_strategy)
+    , m_global_sampling(config.global_sampling)
     , m_half_precision(config.half_precision)
     , m_verbose(config.verbose)
 {
@@ -567,7 +569,7 @@ void distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> 
         }
 
         // Iterate over nodes and issuing corresponding rpc requests
-        std::unordered_map<int, std::vector<int>> representatives_indices_per_node = pick_random_indices(m_R);
+        std::unordered_map<int, std::vector<int>> representatives_indices_per_node = pick_random_indices(m_R, m_global_sampling);
 
         auto offset = 0;
         for (const auto& indices : representatives_indices_per_node) {
@@ -593,7 +595,7 @@ void distributed_stream_loader_t::dispatch_rpcs(std::vector<tl::async_response> 
             client_activations_rep_bulks.push_back(m_client_activations_rep_mem[i].bulk);
         }
 
-        std::unordered_map<int, std::vector<int>> activations_indices_per_node = pick_random_indices(m_R_distillation);
+        std::unordered_map<int, std::vector<int>> activations_indices_per_node = pick_random_indices(m_R_distillation, m_global_sampling);
 
         auto offset = 0;
         for (const auto& indices : activations_indices_per_node) {
@@ -811,7 +813,7 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_python_batch(const queu
  * The map returned by this function maps remote node indices to local indices.
  * Local indices might be used to access the provider_handles vector.
  */
-std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int R)
+std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_random_indices(int R, bool global_sampling)
 {
     nvtx3::scoped_range nvtx{"pick_random_indices"};
 
@@ -831,7 +833,14 @@ std::unordered_map<int, std::vector<int>> distributed_stream_loader_t::pick_rand
     for (size_t i = 0; i < choices.size(); i++) {
         int global_index = choices[i];
         int local_index = global_index % (K * N);
-        size_t node = global_index / (K * N);
+
+        size_t node = -1;
+        if (global_sampling) {
+            node = global_index / (K * N);
+        } else {
+            node = 0;
+        }
+
         ASSERT(node >= 0 && node < provider_handles.size());
         indices_per_node[node].push_back(local_index);
     }
