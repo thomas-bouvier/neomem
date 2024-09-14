@@ -28,15 +28,27 @@ enum Task {
 };
 enum BufferStrategy { NoBuffer, CPUBuffer, CUDABuffer };
 
+struct Config {
+    Task task_type;
+    unsigned int K;
+    unsigned int N;
+    unsigned int C;
+    int64_t seed;
+    unsigned int R;
+    unsigned int num_samples_per_representative;
+    std::vector<long> representative_shape;
+    unsigned int R_distillation;
+    unsigned int num_samples_per_activation;
+    std::vector<long> activation_shape;
+    BufferStrategy buffer_strategy;
+    bool discover_endpoints;
+    bool half_precision;
+    bool verbose;
+};
+
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
 private:
-    distributed_stream_loader_t(const engine_loader_t& _engine_loader, Task _task_type,
-        unsigned int K, unsigned int N, unsigned int C, int64_t seed,
-        unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
-        unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-        BufferStrategy buffer_strategy,
-        bool discover_endpoints = false, bool half_precision = false, bool verbose = false
-    );
+    distributed_stream_loader_t(const engine_loader_t& _engine_loader, const Config& config);
     
 public:
     static distributed_stream_loader_t* create(const engine_loader_t& engine_loader, Task task_type,
@@ -71,6 +83,13 @@ public:
 
 protected:
     uint16_t m_provider_id;
+
+    void initialize_num_bytes_per_representative();
+    void register_procedures();
+    void initialize_mpi();
+    void initialize_cuda();
+    void initialize_rehearsal_buffers();
+    void initialize_rdma_buffers();
 
     void init_rehearsal_buffers(std::unique_ptr<torch::Tensor>& storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
     void init_receiving_rdma_buffer(std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nelements, size_t nsamples_per_element, std::vector<long> sample_shape);

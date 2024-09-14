@@ -38,6 +38,36 @@ void checkLast(const char* const file, const int line) {
 
 #endif
 
+/**
+ * This factory method (as well as the private constructor) prevents users
+ * from putting an instance of distributed_stream_loader_t on the stack.
+ */
+/* static */ distributed_stream_loader_t* distributed_stream_loader_t::create(const engine_loader_t& engine_loader, Task task_type,
+        unsigned int K, unsigned int N, unsigned int C, int64_t seed,
+        unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
+        unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
+        BufferStrategy buffer_strategy, bool discover_endpoints, bool half_precision, bool verbose)
+{
+    Config config {
+        task_type,
+        K,
+        N,
+        C,
+        seed,
+        R,
+        num_samples_per_representative,
+        std::move(representative_shape),
+        R_distillation,
+        num_samples_per_activation,
+        std::move(activation_shape),
+        buffer_strategy,
+        discover_endpoints,
+        half_precision,
+        verbose
+    };
+
+    return new distributed_stream_loader_t(engine_loader, config);
+}
 
 /**
  * This constructor initializes the provider. This class is both a server and a
@@ -49,37 +79,71 @@ void checkLast(const char* const file, const int line) {
  * buffers.
  */
 distributed_stream_loader_t::distributed_stream_loader_t(
-        const engine_loader_t& _engine_loader, Task task_type,
-        unsigned int _K, unsigned int _N, unsigned int _C, int64_t seed,
-        unsigned int R, unsigned int num_samples_per_representative, std::vector<long> _representative_shape,
-        unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-        BufferStrategy _buffer_strategy, bool discover_endpoints, bool half_precision, bool verbose)
-              : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id()),
-                m_provider_id(_engine_loader.get_id()),
-                m_task_type(task_type), K(_K), N(_N), C(_C), rand_gen(seed),
-                m_R(R), m_num_samples_per_representative(num_samples_per_representative), representative_shape(_representative_shape),
-                m_R_distillation(R_distillation), m_num_samples_per_activation(num_samples_per_activation), m_activation_shape(activation_shape),
-                buffer_strategy(_buffer_strategy), m_half_precision(half_precision), m_verbose(verbose)
+    const engine_loader_t& _engine_loader, 
+    const Config& config)
+    : tl::provider<distributed_stream_loader_t>(_engine_loader.get_engine(), _engine_loader.get_id())
+    , m_provider_id(_engine_loader.get_id())
+    , m_task_type(config.task_type)
+    , K(config.K)
+    , N(config.N)
+    , C(config.C)
+    , rand_gen(config.seed)
+    , m_R(config.R)
+    , m_num_samples_per_representative(config.num_samples_per_representative)
+    , representative_shape(config.representative_shape)
+    , m_R_distillation(config.R_distillation)
+    , m_num_samples_per_activation(config.num_samples_per_activation)
+    , m_activation_shape(config.activation_shape)
+    , buffer_strategy(config.buffer_strategy)
+    , m_half_precision(config.half_precision)
+    , m_verbose(config.verbose)
 {
-    m_num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
+    initialize_num_bytes_per_representative();
+    register_procedures();
 
-    // Register server procedures
-    m_server_representatives_procedure = define("get_representatives", &distributed_stream_loader_t::get_remote_representatives);
-    m_server_activations_procedure = define("get_activations", &distributed_stream_loader_t::get_remote_activations);
-
-    // Register the remote procedure
-    m_client_representatives_procedure = get_engine().define("get_representatives");
-    m_client_activations_procedure = get_engine().define("get_activations");
-
-    // Setup a finalization callback for this provider, in case it is
-    // still alive when the engine is finalized.
+    // Setup a finalization callback for this provider
     get_engine().push_finalize_callback(this, [p=this]() {
-        if (p->m_verbose)
+        if (p->m_verbose) {
             DBG("[" << p->m_provider_id << "] Shutting down current provider...");
+            std::cout << "shut" << std::endl;
+        } 
         delete p;
     });
 
-    // MPI has maybe been initialized by horovodrun
+    initialize_mpi();
+    // Discover endpoints if required
+    if (config.discover_endpoints) {
+        auto endpoints = gather_endpoints();
+        register_endpoints(endpoints);
+    }
+
+    initialize_cuda();
+    initialize_rehearsal_buffers();
+    initialize_rdma_buffers();
+}
+
+/**
+ * Calculates the number of bytes per representative based on the shape.
+ */
+void distributed_stream_loader_t::initialize_num_bytes_per_representative() {
+    m_num_bytes_per_representative = 4 * std::accumulate(representative_shape.begin(), representative_shape.end(), 1, std::multiplies<int>());
+}
+
+/**
+ * Registers the RPC procedures for getting representatives and activations.
+ */
+void distributed_stream_loader_t::register_procedures() {
+    m_server_representatives_procedure = define("get_representatives", &distributed_stream_loader_t::get_remote_representatives);
+    m_server_activations_procedure = define("get_activations", &distributed_stream_loader_t::get_remote_activations);
+
+    m_client_representatives_procedure = get_engine().define("get_representatives");
+    m_client_activations_procedure = get_engine().define("get_activations");
+}
+
+/**
+ * Initializes MPI, sets the rank and number of workers.
+ */
+void distributed_stream_loader_t::initialize_mpi() {
     int mpi_initialized = true;
     MPI_Initialized(&mpi_initialized);
     if (!mpi_initialized) {
@@ -87,16 +151,12 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     }
     MPI_Comm_rank(MPI_COMM_WORLD, &m_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &m_num_workers);
+}
 
-    // If enabled, get the remote endpoints via the MPI publishing mechanism
-    if (discover_endpoints) {
-        std::map<std::string, int> all_endpoints = gather_endpoints();
-        if (all_endpoints.size() > 0) {
-            std::cout << "endpoint size " << all_endpoints.size() << std::endl;
-            register_endpoints(all_endpoints);
-        }
-    }
-
+/**
+ * Initializes CUDA devices and streams if CUDA is available.
+ */
+void distributed_stream_loader_t::initialize_cuda() {
 #ifndef WITHOUT_CUDA
     m_local_rank = std::atoi(std::getenv("OMPI_COMM_WORLD_LOCAL_RANK"));
     int num_devices = 0;
@@ -104,22 +164,31 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     cudaSetDevice(m_local_rank % num_devices);
 
     if (m_verbose)
-        DBG("[" << engine_loader.get_id() << "] Setting CUDA device " << m_local_rank % num_devices);
+        DBG("[" << m_provider_id << "] Setting CUDA device " << m_local_rank % num_devices);
 
     // streamNonBlockingSync causes a sync issue
     // To reproduce, use only async copy functions, except in copy_last_batch.
     for (size_t i = 0; i < m_streams.size(); i++)
         CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[i]));
 #endif
+}
 
+/**
+ * Initializes the rehearsal buffers for representatives.
+ */
+void distributed_stream_loader_t::initialize_rehearsal_buffers() {
     init_rehearsal_buffers(
         m_rehearsal_representatives,
         m_num_samples_per_representative,
         representative_shape,
         torch::cuda::is_available()
     );
+}
 
-    // Initialize 
+/**
+ * Initializes the RDMA buffers for representatives and activations.
+ */
+void distributed_stream_loader_t::initialize_rdma_buffers() {
     if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
         init_receiving_rdma_buffer(
             m_server_mems,
@@ -133,7 +202,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
         ASSERT(m_num_samples_per_activation > 0);
         // This should be changed to float32 if not training in half precision!
-        m_num_bytes_per_activation = std::accumulate(activation_shape.begin(), activation_shape.end(), 1, std::multiplies<int>());
+        m_num_bytes_per_activation = std::accumulate(m_activation_shape.begin(), m_activation_shape.end(), 1, std::multiplies<int>());
         if (m_half_precision) {
             m_num_bytes_per_activation *= 2;
         } else {
@@ -143,7 +212,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
         init_rehearsal_buffers(
             m_rehearsal_activations,
             m_num_samples_per_activation,
-            activation_shape,
+            m_activation_shape,
             torch::cuda::is_available()
         );
 
@@ -153,7 +222,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
             m_client_activations_mem,
             m_R_distillation,
             m_num_samples_per_activation,
-            activation_shape
+            m_activation_shape
         );
         init_receiving_rdma_buffer(
             m_server_activations_rep_mem,
@@ -163,24 +232,6 @@ distributed_stream_loader_t::distributed_stream_loader_t(
             representative_shape
         );
     }
-}
-
-/**
- * This factory method (as well as the private constructor) prevents users
- * from putting an instance of distributed_stream_loader_t on the stack.
- */
-/* static */ distributed_stream_loader_t* distributed_stream_loader_t::create(const engine_loader_t& engine_loader, Task task_type,
-        unsigned int K, unsigned int N, unsigned int C, int64_t seed,
-        unsigned int R, unsigned int num_samples_per_representative, std::vector<long> representative_shape,
-        unsigned int R_distillation, unsigned int num_samples_per_activation, std::vector<long> activation_shape,
-        BufferStrategy buffer_strategy, bool discover_endpoints, bool half_precision, bool verbose)
-{
-    return new distributed_stream_loader_t(
-        engine_loader, task_type, K, N, C, seed,
-        R, num_samples_per_representative, representative_shape,
-        R_distillation, num_samples_per_activation, activation_shape,
-        buffer_strategy, discover_endpoints, half_precision, verbose
-    );
 }
 
 /**
@@ -198,7 +249,9 @@ std::map<std::string, int> distributed_stream_loader_t::gather_endpoints()
 }
 
 /**
+ * Populate the provider_handles vector to access remote nodes.
  *
+ * First handle corresponds to the local (current) server.
  */
 void distributed_stream_loader_t::register_endpoints(const std::map<std::string, int>& endpoints)
 {
