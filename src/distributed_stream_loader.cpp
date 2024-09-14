@@ -1,5 +1,6 @@
 #include "distributed_stream_loader.hpp"
 #include "mpi_utils.hpp"
+#include "memory_utils.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -13,30 +14,6 @@
 
 
 using namespace torch::indexing;
-
-#ifndef WITHOUT_CUDA
-
-#define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
-template <typename T>
-void check(T err, const char* const func, const char* const file, const int line) {
-    if (err != cudaSuccess) {
-        std::cerr << "CUDA Runtime Error at: " << file << ":" << line << std::endl;
-        std::cerr << cudaGetErrorString(err) << " " << func << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-}
-
-#define CHECK_LAST_CUDA_ERROR() checkLast(__FILE__, __LINE__)
-void checkLast(const char* const file, const int line) {
-    cudaError_t err{cudaGetLastError()};
-    if (err != cudaSuccess) {
-        std::cerr << "CUDA Runtime Error at: " << file << ":" << line << std::endl;
-        std::cerr << cudaGetErrorString(err) << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-}
-
-#endif
 
 /**
  * This factory method (as well as the private constructor) prevents users
@@ -107,7 +84,6 @@ distributed_stream_loader_t::distributed_stream_loader_t(
     get_engine().push_finalize_callback(this, [p=this]() {
         if (p->m_verbose) {
             DBG("[" << p->m_provider_id << "] Shutting down current provider...");
-            std::cout << "shut" << std::endl;
         } 
         delete p;
     });
@@ -480,48 +456,33 @@ void distributed_stream_loader_t::copy_last_batch(const queue_item_t &batch)
 
     // Copy incoming samples into the next augmented minibatch
 #ifndef WITHOUT_CUDA
+    cudaStream_t stream = m_streams[0];
+#else
+    NullStream stream;
+#endif
+
     for (size_t i = 0; i < m_num_samples_per_representative; i++) {
-        CHECK_CUDA_ERROR(cudaMemcpyAsync(
+        smart_copy(
             (char *) batch.m_aug_representatives[i].data_ptr(),
             batch.m_representatives[i].data_ptr(),
             batch.get_size() * m_num_bytes_per_representative,
-            cudaMemcpyDefault,
-            m_streams[0]
-        ));
+            stream
+        );
     }
-    CHECK_CUDA_ERROR(cudaMemcpyAsync(
+
+    smart_copy(
         (char *) batch.m_aug_targets.data_ptr(),
         batch.m_targets.data_ptr(),
         batch.get_size() * batch.m_targets.element_size(),
-        cudaMemcpyDefault,
-        m_streams[0]
-    ));
-    CHECK_CUDA_ERROR(cudaMemcpyAsync(
+        stream
+    );
+
+    smart_copy(
         (char *) batch.m_aug_weights.data_ptr(),
         batch.m_weights.data_ptr(),
         batch.get_size() * batch.m_weights.element_size(),
-        cudaMemcpyDefault,
-        m_streams[0]
-    ));
-#else
-    for (size_t i = 0; i < m_num_samples_per_representative; i++) {
-        std::memcpy(
-            (char *) batch.m_aug_representatives[i].data_ptr(),
-            batch.m_representatives[i].data_ptr(),
-            batch.get_size() * m_num_bytes_per_representative
-        );
-    }
-    std::memcpy(
-        (char *) batch.m_aug_targets.data_ptr(),
-        batch.m_targets.data_ptr(),
-        batch.get_size() * batch.m_targets.element_size()
+        stream
     );
-    std::memcpy(
-        (char *) batch.m_aug_weights.data_ptr(),
-        batch.m_weights.data_ptr(),
-        batch.get_size() * batch.m_weights.element_size()
-    );
-#endif
 
     m_metrics[i_batch].batch_copy_time = 0;
 }
@@ -644,36 +605,26 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
 
                 for (size_t j = 0; j < it.m_num_elements; j++) {
 #ifndef WITHOUT_CUDA
-                    CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                    cudaStream_t stream = m_streams[0];
+#else
+                    NullStream stream;
+#endif
+
+                    smart_copy(
                         // no * batch.element_size() as type is given
                         m_buf_targets->data_ptr<long int>() + batch.aug_size,
                         &it.m_label,
                         sizeof(it.m_label),
-                        cudaMemcpyDefault,
-                        m_streams[0]
-                    ));
-                    CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                        stream
+                    );
+
+                    smart_copy(
                         m_buf_weights->data_ptr<float>() + batch.aug_size,
                         &it.m_weight,
                         sizeof(it.m_weight),
-                        cudaMemcpyDefault,
-                        m_streams[0]
-                    ));
-#else
-                    //m_buf_targets->index_put_({batch.aug_size}, it.m_label);
-                    //m_buf_weights->index_put_({batch.aug_size}, it.m_weight);
-                    std::memcpy(
-                        // no * batch.element_size() as type is given
-                        m_buf_targets->data_ptr<long int>() + batch.aug_size,
-                        &it.m_label,
-                        sizeof(it.m_label)
+                        stream
                     );
-                    std::memcpy(
-                        m_buf_weights->data_ptr<float>() + batch.aug_size,
-                        &it.m_weight,
-                        sizeof(it.m_weight)
-                    );
-#endif
+
                     batch.aug_size++;
                 }
             } else if (it.m_type == RPCResponseType::Activation) {
@@ -741,66 +692,40 @@ void distributed_stream_loader_t::copy_exposed_buffer_to_python_batch(const queu
         // First element is the offset in the client exposed memory, second
         // element is the chunk size in bytes.
 #ifndef WITHOUT_CUDA
+        cudaStream_t stream = m_streams[0];
+#else
+        NullStream stream;
+#endif
+
         if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
             for (size_t r = 0; r < m_num_samples_per_representative; r++) {
-                CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                smart_copy(
                     static_cast<char *>(m_buf_representatives->at(r).data_ptr()) + (batch.m_augmentation_mark + cumulated_offset) * m_num_bytes_per_representative,
                     static_cast<char *>(m_client_mems[r].buffer->data_ptr()) + pair.first * m_num_bytes_per_representative,
                     pair.second * m_num_bytes_per_representative,
-                    cudaMemcpyDefault,
-                    m_streams[0]
-                ));
+                    stream
+                );
             }
         }
 
         if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
             // Copying activations
             for (size_t r = 0; r < m_num_samples_per_activation; r++) {
-                CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                smart_copy(
                     static_cast<char *>(m_buf_activations->at(r).data_ptr()) + cumulated_offset * m_num_bytes_per_activation,
                     static_cast<char *>(m_client_activations_mem[r].buffer->data_ptr()) + pair.first * m_num_bytes_per_activation,
                     pair.second * m_num_bytes_per_activation,
-                    cudaMemcpyDefault,
-                    m_streams[0]
-                ));
+                    stream
+                );
             }
             // Copying corresponding training representative
-            CHECK_CUDA_ERROR(cudaMemcpyAsync(
+            smart_copy(
                 static_cast<char *>(m_buf_activations_rep->data_ptr()) + cumulated_offset * m_num_bytes_per_representative,
                 static_cast<char *>(m_client_activations_rep_mem[0].buffer->data_ptr()) + pair.first * m_num_bytes_per_representative,
                 pair.second * m_num_bytes_per_representative,
-                cudaMemcpyDefault,
-                m_streams[0]
-            ));
-        }
-#else
-        if (m_task_type == Task::REHEARSAL || m_task_type == Task::REHEARSAL_KD) {
-            for (size_t r = 0; r < m_num_samples_per_representative; r++) {
-                std::memcpy(
-                    static_cast<char *>(m_buf_representatives->at(r).data_ptr()) + (batch.m_augmentation_mark + cumulated_offset) * m_num_bytes_per_representative,
-                    static_cast<char *>(m_client_mems[r].buffer->data_ptr()) + pair.first * m_num_bytes_per_representative,
-                    pair.second * m_num_bytes_per_representative
-                );
-            }
-        }
-
-        if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
-            // Copying activations
-            for (size_t r = 0; r < m_num_samples_per_activation; r++) {
-                std::memcpy(
-                    static_cast<char *>(m_buf_activations->at(r).data_ptr()) + cumulated_offset * m_num_bytes_per_activation,
-                    static_cast<char *>(m_client_activations_mem[r].buffer->data_ptr()) + pair.first * m_num_bytes_per_activation,
-                    pair.second * m_num_bytes_per_activation
-                );
-            }
-            // Copying corresponding training representative
-            std::memcpy(
-                static_cast<char *>(m_buf_activations_rep->data_ptr()) + cumulated_offset * m_num_bytes_per_representative,
-                static_cast<char *>(m_client_activations_rep_mem[0].buffer->data_ptr()) + pair.first * m_num_bytes_per_representative,
-                pair.second * m_num_bytes_per_representative
+                stream
             );
         }
-#endif
         cumulated_offset += pair.second;
     }
 
@@ -877,44 +802,29 @@ void distributed_stream_loader_t::populate_rehearsal_buffer(const queue_item_t& 
         size_t j = N * label + index;
         ASSERT(j < K * N);
 #ifndef WITHOUT_CUDA
+        cudaStream_t stream = m_streams[1];
+#else
+        NullStream stream;
+#endif
+
         for (size_t k = 0; k < m_num_samples_per_representative; k++) {
-            CHECK_CUDA_ERROR(cudaMemcpyAsync(
+            smart_copy(
                 (char *) m_rehearsal_representatives->data_ptr() + m_num_bytes_per_representative * (m_num_samples_per_representative * j + k),
                 (char *) batch.m_representatives[k].data_ptr() + m_num_bytes_per_representative * i,
                 m_num_bytes_per_representative,
-                cudaMemcpyDefault,
-                m_streams[1]
-            ));
-        }
-        if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
-            for (size_t k = 0; k < m_num_samples_per_activation; k++) {
-                CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                    (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * (m_num_samples_per_activation * j + k),
-                    (char *) batch.m_activations[k].data_ptr() + m_num_bytes_per_activation * i,
-                    m_num_bytes_per_activation,
-                    cudaMemcpyDefault,
-                    m_streams[1]
-                ));
-            }
-        }
-#else
-        for (size_t k = 0; k < m_num_samples_per_representative; k++) {
-            std::memcpy(
-                (char *) m_rehearsal_representatives->data_ptr() + m_num_bytes_per_representative * (m_num_samples_per_representative * j + k),
-                (char *) batch.m_representatives[k].data_ptr() + m_num_bytes_per_representative * i,
-                m_num_bytes_per_representative
+                stream
             );
         }
         if (m_task_type == Task::KD || m_task_type == Task::REHEARSAL_KD) {
             for (size_t k = 0; k < m_num_samples_per_activation; k++) {
-                std::memcpy(
+                smart_copy(
                     (char *) m_rehearsal_activations->data_ptr() + m_num_bytes_per_activation * (m_num_samples_per_activation * j + k),
                     (char *) batch.m_activations[k].data_ptr() + m_num_bytes_per_activation * i,
-                    m_num_bytes_per_activation
+                    m_num_bytes_per_activation,
+                    stream
                 );
             }
         }
-#endif
 
         if (index >= rehearsal_metadata[label].first) {
             m_rehearsal_size++;
@@ -1051,28 +961,22 @@ void distributed_stream_loader_t::get_remote_representatives(
 
         attached_metadata.emplace_back(rpc_response_t(RPCResponseType::Representative, reprs_indices.size(), offset + o, label, weight));
 
-        for (size_t i = 0; i < reprs_indices.size(); i++) {
 #ifndef WITHOUT_CUDA
+        cudaStream_t stream = m_streams[2];
+#else
+        NullStream stream;
+#endif
+
+        for (size_t i = 0; i < reprs_indices.size(); i++) {
             for (size_t r = 0; r < m_num_samples_per_representative; r++) {
                 const int index = m_num_samples_per_representative * reprs_indices[i] + r;
-                CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                smart_copy(
                     (char *) m_server_mems[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
                     m_rehearsal_representatives->index({index}).data_ptr(),
                     m_num_bytes_per_representative,
-                    cudaMemcpyDefault,
-                    m_streams[2]
-                ));
-            }
-#else
-            for (size_t r = 0; r < m_num_samples_per_representative; r++) {
-                const int index = m_num_samples_per_representative * reprs_indices[i] + r;
-                std::memcpy(
-                    (char *) m_server_mems[r].buffer->data_ptr() + m_num_bytes_per_representative * o,
-                    m_rehearsal_representatives->index({index}).data_ptr(),
-                    m_num_bytes_per_representative
+                    stream
                 );
             }
-#endif
             o++;
         }
     }
@@ -1140,43 +1044,29 @@ void distributed_stream_loader_t::get_remote_activations(
 
         attached_metadata.emplace_back(rpc_response_t(RPCResponseType::Activation, reprs_indices.size(), offset + o));
 
-        for (size_t i = 0; i < reprs_indices.size(); i++) {
 #ifndef WITHOUT_CUDA
+        cudaStream_t stream = m_streams[3];
+#else
+        NullStream stream;
+#endif
+
+        for (size_t i = 0; i < reprs_indices.size(); i++) {
             for (size_t r = 0; r < m_num_samples_per_activation; r++) {
                 const int index = m_num_samples_per_activation * reprs_indices[i] + r;
-                CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                smart_copy(
                     (char *) m_server_activations_mem[r].buffer->data_ptr() + m_num_bytes_per_activation * o,
                     (char *) m_rehearsal_activations->index({index}).data_ptr(),
                     m_num_bytes_per_activation,
-                    cudaMemcpyDefault,
-                    m_streams[3]
-                ));
+                    stream
+                );
             }
             const int index = m_num_samples_per_representative * reprs_indices[i];
-            CHECK_CUDA_ERROR(cudaMemcpyAsync(
+            smart_copy(
                 (char *) m_server_activations_rep_mem[0].buffer->data_ptr() + m_num_bytes_per_representative * o,
                 (char *) m_rehearsal_representatives->index({index}).data_ptr(),
                 m_num_bytes_per_representative,
-                cudaMemcpyDefault,
-                m_streams[3]
-            ));
-#else
-            for (size_t r = 0; r < m_num_samples_per_activation; r++) {
-                const int index = m_num_samples_per_activation * reprs_indices[i] + r;
-                std::memcpy(
-                    (char *) m_server_activations_mem[r].buffer->data_ptr() + m_num_bytes_per_activation * o,
-                    m_rehearsal_activations->index({index}).data_ptr(),
-                    m_num_bytes_per_activation
-                );
-            }
-            // Copying the first representative only.
-            const int index = m_num_samples_per_representative * reprs_indices[i];
-            std::memcpy(
-                (char *) m_server_activations_rep_mem[0].buffer->data_ptr() + m_num_bytes_per_representative * o,
-                m_rehearsal_representatives->index({index}).data_ptr(),
-                m_num_bytes_per_representative
+                stream
             );
-#endif
             o++;
         }
     }
