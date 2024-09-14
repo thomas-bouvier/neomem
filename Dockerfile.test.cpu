@@ -1,5 +1,5 @@
 # Build stage with Spack pre-installed and ready to be used
-FROM spack/ubuntu-jammy:latest as builder
+FROM spack/ubuntu-jammy:latest AS builder
 
 ARG MPI_KIND=openmpi
 ARG PYTHON_VERSION=3.10
@@ -21,7 +21,7 @@ RUN mkdir /opt/spack-environment \
 &&   echo "      providers:" \
 &&   echo "        mpi: [$MPI_KIND]" \
 &&   echo "  specs:" \
-&&   echo "  - mochi-thallium ^argobots ^mercury +boostsys +ofi +debug ^libfabric +debug fabrics=tcp,rxm,verbs" \
+&&   echo "  - mochi-thallium@0.12.0 ^argobots ^mercury +boostsys +ofi +debug ^libfabric +debug fabrics=tcp,rxm,verbs" \
 &&   echo "  - mpi" \
 &&   echo "  - python@$PYTHON_VERSION" \
 &&   echo "  - nvtx +python" \
