@@ -130,7 +130,6 @@ protected:
     void async_process();
 
     void augment_batch(queue_item_t &batch);
-    std::vector<std::pair<int, int>> merge_contiguous_memory(std::vector<std::pair<int, int>>& sections) const;
     void copy_exposed_buffer_to_python_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections);
     void create_exposed_memory(std::vector<exposed_memory_t>& memory, size_t nelements, size_t nsamples_per_element, std::vector<long> sample_shape, exposed_memory_attr attr);
 

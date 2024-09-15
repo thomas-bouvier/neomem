@@ -593,35 +593,6 @@ void distributed_stream_loader_t::resolve_rpcs(std::vector<tl::async_response>& 
 }
 
 /**
- * Returns a vector to keep the same order.
- */
-std::vector<std::pair<int, int>> distributed_stream_loader_t::merge_contiguous_memory(std::vector<std::pair<int, int>>& sections) const
-{
-    std::vector<std::pair<int, int>> mergedPairs;
-    if (sections.empty()) {
-        return mergedPairs;
-    }
-
-    // Sort the sections based on the memory offset (first element of the pair)
-    std::sort(sections.begin(), sections.end());
-
-    // Merge contiguous chunks of memory
-    mergedPairs.push_back(sections[0]);
-    for (size_t i = 1; i < sections.size(); ++i) {
-        int prevEnd = mergedPairs.back().first + mergedPairs.back().second;
-        if (sections[i].first == prevEnd) {
-            // Merge the current pair with the previous pair
-            mergedPairs.back().second += sections[i].second;
-        } else {
-            // Non-contiguous, add as a new pair
-            mergedPairs.push_back(sections[i]);
-        }
-    }
-
-    return mergedPairs;
-}
-
-/**
  * This function copies data from the exposed bulk to the minibatch
  * `dest_samples`. The latter has either been passed during the last iteration
  * (`batch.aug_samples`)  or has been allocated once at the beginning of the

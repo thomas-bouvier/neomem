@@ -2,6 +2,7 @@
 #define __MEMORY_UTILS_HPP
 
 #include <cstring>
+#include <vector>
 
 #ifndef WITHOUT_CUDA
 #include <cuda_runtime.h>
@@ -41,5 +42,7 @@ inline void smart_copy(void* dst, const void* src, size_t size, NullStream = Nul
     copy_memory(dst, src, size, NullStream{});
 }
 #endif
+
+std::vector<std::pair<int, int>> merge_contiguous_memory(std::vector<std::pair<int, int>>& sections);
 
 #endif // __MEMORY_UTILS_HPP

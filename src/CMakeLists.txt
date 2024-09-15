@@ -1,6 +1,7 @@
 # Set sources and executable
 set(LIBRARY_SOURCES
     engine_loader.cpp
+    memory_utils.cpp
     random_buffer.cpp
     distributed_stream_loader.cpp
     rehearsal.cpp
@@ -12,6 +13,7 @@ target_link_libraries(neomem PUBLIC ${Python_LIBRARIES} ${TORCH_LIBRARIES} ${TOR
 
 set(EXAMPLE_SOURCES
     engine_loader.cpp
+    memory_utils.cpp
     random_buffer.cpp
     distributed_stream_loader.cpp
     main.cpp
