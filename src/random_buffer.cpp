@@ -12,7 +12,7 @@ RandomBuffer::RandomBuffer(RehearsalConfig config)
     , m_rand_gen(config.seed)
 {
     if (m_config.task_type == Task::REHEARSAL || m_config.task_type == Task::REHEARSAL_KD) {
-        init_rehearsal_buffers(
+        allocate(
             m_rehearsal_representatives,
             m_config.num_samples_per_representative,
             m_config.representative_shape,
@@ -22,7 +22,7 @@ RandomBuffer::RandomBuffer(RehearsalConfig config)
     }
 
     if (m_config.task_type == Task::KD || m_config.task_type == Task::REHEARSAL_KD) {
-        init_rehearsal_buffers(
+        allocate(
             m_rehearsal_activations,
             m_config.num_samples_per_activation,
             m_config.activation_shape,
@@ -35,7 +35,7 @@ RandomBuffer::RandomBuffer(RehearsalConfig config)
 /**
  * Initialize
  */
-void RandomBuffer::init_rehearsal_buffers(
+void RandomBuffer::allocate(
         std::unique_ptr<torch::Tensor>& storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers)
 {
     nvtx3::scoped_range nvtx{"init_rehearsal_buffer"};
@@ -68,7 +68,7 @@ void RandomBuffer::initialize_num_bytes_per_activation() {
  * Sample C random elements from the given batch to populate the rehearsal
  * buffer.
  */
-void RandomBuffer::populate_rehearsal_buffer(const queue_item_t& batch, unsigned int nelements)
+void RandomBuffer::populate(const queue_item_t& batch, unsigned int nelements)
 {
     nvtx3::scoped_range nvtx{"populate_rehearsal_buffer"};
 
@@ -155,7 +155,7 @@ void RandomBuffer::update_representative_weights(const queue_item_t& batch, int 
  * If a representative is already present for a label, the representative
  * index is appended to repr_indices.
  */
-std::vector<std::tuple<size_t, float, std::vector<int>>> RandomBuffer::get_actual_rehearsal_indices(const std::vector<int>& indices) const {
+std::vector<std::tuple<size_t, float, std::vector<int>>> RandomBuffer::get_indices(const std::vector<int>& indices) const {
     std::vector<std::tuple<size_t, float, std::vector<int>>> samples;
 
     if (m_rehearsal_size > 0) {

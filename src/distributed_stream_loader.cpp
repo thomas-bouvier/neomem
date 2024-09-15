@@ -358,7 +358,7 @@ void distributed_stream_loader_t::async_process()
 
         {
             std::unique_lock<tl::mutex> lock(rehearsal_mutex);
-            m_buffer.populate_rehearsal_buffer(batch, m_config.C);
+            m_buffer.populate(batch, m_config.C);
         }
         //update_representative_weights(R, batch_size);
         m_metrics[i_batch].buffer_update_time = 0;
@@ -751,7 +751,7 @@ void distributed_stream_loader_t::get_remote_representatives(
 {
     nvtx3::scoped_range nvtx{"get_remote_representatives"};
 
-    std::vector<std::tuple<size_t, float, std::vector<int>>> samples = m_buffer.get_actual_rehearsal_indices(indices);
+    std::vector<std::tuple<size_t, float, std::vector<int>>> samples = m_buffer.get_indices(indices);
     const size_t nrepresentatives = count_samples(samples);
 
     if (m_config.verbose && nrepresentatives > 0) {
@@ -836,7 +836,7 @@ void distributed_stream_loader_t::get_remote_activations(
 {
     nvtx3::scoped_range nvtx{"get_remote_activations"};
 
-    std::vector<std::tuple<size_t, float, std::vector<int>>> samples = m_buffer.get_actual_rehearsal_indices(indices);
+    std::vector<std::tuple<size_t, float, std::vector<int>>> samples = m_buffer.get_indices(indices);
     const size_t nactivations = count_samples(samples);
 
     if (m_config.verbose && nactivations > 0) {

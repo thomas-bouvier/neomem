@@ -32,15 +32,15 @@ struct RehearsalConfig {
 class RandomBuffer {
 public:
     RandomBuffer(RehearsalConfig config);
-    void init_rehearsal_buffers(std::unique_ptr<torch::Tensor>& storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
+    void allocate(std::unique_ptr<torch::Tensor>& storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
 
     RehearsalConfig m_config;
     std::unique_ptr<torch::Tensor> m_rehearsal_representatives;
     std::unique_ptr<torch::Tensor> m_rehearsal_activations;
     unsigned int m_num_bytes_per_representative, m_num_bytes_per_activation;
 
-    void populate_rehearsal_buffer(const queue_item_t& batch, unsigned int nelements);
-    std::vector<std::tuple<size_t, float, std::vector<int>>> get_actual_rehearsal_indices(const std::vector<int>& indices) const;
+    void populate(const queue_item_t& batch, unsigned int nelements);
+    std::vector<std::tuple<size_t, float, std::vector<int>>> get_indices(const std::vector<int>& indices) const;
     size_t get_rehearsal_size();
 
 protected:
