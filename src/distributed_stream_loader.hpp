@@ -6,6 +6,7 @@
 #include "debug.hpp"
 #include "queue_item.hpp"
 #include "metrics.hpp"
+#include "random_buffer.hpp"
 #include "rpc_response.hpp"
 
 #include <torch/extension.h>
@@ -21,30 +22,18 @@
 
 namespace tl = thallium;
 
-enum Task { 
-    REHEARSAL,
-    KD,
-    REHEARSAL_KD
-};
 enum BufferStrategy { NoBuffer, CPUBuffer, CUDABuffer };
 
 struct Config {
-    Task task_type;
-    unsigned int K;
-    unsigned int N;
     unsigned int C;
-    int64_t seed;
     unsigned int R;
-    unsigned int num_samples_per_representative;
-    std::vector<long> representative_shape;
     unsigned int R_distillation;
-    unsigned int num_samples_per_activation;
-    std::vector<long> activation_shape;
     BufferStrategy buffer_strategy;
     bool discover_endpoints;
     bool global_sampling;
-    bool half_precision;
     bool verbose;
+    int64_t seed;
+    RehearsalConfig rehearsal_config;
 };
 
 class distributed_stream_loader_t : public tl::provider<distributed_stream_loader_t> {
@@ -73,7 +62,7 @@ public:
 
     void use_these_allocated_variables(
         const std::vector<torch::Tensor>& buf_representatives, const torch::Tensor& buf_targets, const torch::Tensor& buf_weights,
-        const std::vector<torch::Tensor>& buf_activations, const torch::Tensor& buf_ativations_rep
+        const std::vector<torch::Tensor>& buf_activations, const torch::Tensor& buf_activations_rep
     );
 
     void enable_augmentation(bool state);
@@ -83,15 +72,14 @@ public:
 
 protected:
     uint16_t m_provider_id;
+    Config m_config;
+    RandomBuffer m_buffer;
 
-    void initialize_num_bytes_per_representative();
     void register_procedures();
     void initialize_mpi();
     void initialize_cuda();
-    void initialize_rehearsal_buffers();
-    void initialize_rdma_buffers();
 
-    void init_rehearsal_buffers(std::unique_ptr<torch::Tensor>& storage, size_t nsamples, std::vector<long> sample_shape, bool pin_buffers);
+    void initialize_rdma_buffers();
     void init_receiving_rdma_buffer(std::vector<exposed_memory_t>& server_mems, std::vector<exposed_memory_t>& client_mems, size_t nelements, size_t nsamples_per_element, std::vector<long> sample_shape);
 
     void copy_last_batch(const queue_item_t &batch);
@@ -99,27 +87,7 @@ protected:
     void resolve_rpcs(std::vector<tl::async_response> &responses, queue_item_t &batch);
 
     const size_t MAX_QUEUE_SIZE = 1024;
-
-    //---------------------------------Will be moved to buffer class
-    Task m_task_type;
-    unsigned int K, N, C;
-    std::default_random_engine rand_gen;
-    unsigned int m_R, m_num_samples_per_representative, m_num_bytes_per_representative;
-    std::vector<long> representative_shape;
-    unsigned int m_R_distillation, m_num_samples_per_activation, m_num_bytes_per_activation;
-    std::vector<long> m_activation_shape;
-    BufferStrategy buffer_strategy = NoBuffer;
-    bool m_global_sampling;
-    bool m_half_precision;
-    bool m_verbose;
-
-    std::unique_ptr<torch::Tensor> m_rehearsal_representatives;
-    std::unique_ptr<torch::Tensor> m_rehearsal_activations;
-    std::vector<std::pair<size_t, float>> rehearsal_metadata;
-    std::vector<int> rehearsal_counts;
-    size_t m_rehearsal_size = 0;
-    //---------------------------------Will be moved to buffer class
-
+    std::default_random_engine m_rand_gen;
     int i_batch = 0;
     std::map<int, metrics_t> m_metrics;
 
@@ -165,13 +133,10 @@ protected:
     std::vector<std::pair<int, int>> merge_contiguous_memory(std::vector<std::pair<int, int>>& sections) const;
     void copy_exposed_buffer_to_python_batch(const queue_item_t &batch, const std::vector<std::pair<int, int>>& sections);
     void create_exposed_memory(std::vector<exposed_memory_t>& memory, size_t nelements, size_t nsamples_per_element, std::vector<long> sample_shape, exposed_memory_attr attr);
-    void populate_rehearsal_buffer(const queue_item_t& batch);
-    void update_representative_weights(const queue_item_t& batch, int num_representatives);
 
     std::unordered_map<int, std::vector<int>> pick_random_indices(int effective_representatives, bool global_sampling);
 
     int count_samples(const std::vector<std::tuple<size_t, float, std::vector<int>>>& samples) const;
-    std::vector<std::tuple<size_t, float, std::vector<int>>> get_actual_rehearsal_indices(const std::vector<int>& indices) const;
     void get_remote_representatives(
         const tl::request& req,
         std::vector<tl::bulk>& client_bulks, const std::vector<int>& indices, int offset
