@@ -2,6 +2,8 @@
 #define __MEMORY_UTILS_HPP
 
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #ifndef WITHOUT_CUDA
