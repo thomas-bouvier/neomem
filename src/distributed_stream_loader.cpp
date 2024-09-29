@@ -128,13 +128,17 @@ void distributed_stream_loader_t::initialize_cuda() {
     cudaGetDeviceCount(&num_devices);
     cudaSetDevice(m_local_rank % num_devices);
 
-    if (m_verbose)
+    if (m_config.verbose)
         DBG("[" << m_provider_id << "] Setting CUDA device " << m_local_rank % num_devices);
 
     // streamNonBlockingSync causes a sync issue
     // To reproduce, use only async copy functions, except in copy_last_batch.
-    for (size_t i = 0; i < m_streams.size(); i++)
-        CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[i]));
+    for (size_t i = 0; i < m_streams.size(); i++) {
+        cudaError_t err = cudaStreamCreate(&m_streams[i]);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("CUDA stream creation failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }
 #endif
 }
 
@@ -744,7 +748,7 @@ void distributed_stream_loader_t::get_remote_representatives(
         attached_metadata.emplace_back(rpc_response_t(RPCResponseType::Representative, reprs_indices.size(), offset + o, label, weight));
 
 #ifndef WITHOUT_CUDA
-        cudaStream_t stream = m_streams[2];
+        cudaStream_t stream = m_streams[1];
 #else
         NullStream stream;
 #endif
@@ -768,7 +772,7 @@ void distributed_stream_loader_t::get_remote_representatives(
     if (nrepresentatives > 0) {
 #ifndef WITHOUT_CUDA
         // The rehearsal_mutex is still held
-        cudaStreamSynchronize(m_streams[2]);
+        cudaStreamSynchronize(m_streams[1]);
 #endif
 
         const auto num_bytes_representatives = nrepresentatives * m_buffer.m_num_bytes_per_representative;
@@ -827,7 +831,7 @@ void distributed_stream_loader_t::get_remote_activations(
         attached_metadata.emplace_back(rpc_response_t(RPCResponseType::Activation, reprs_indices.size(), offset + o));
 
 #ifndef WITHOUT_CUDA
-        cudaStream_t stream = m_streams[3];
+        cudaStream_t stream = m_streams[2];
 #else
         NullStream stream;
 #endif
@@ -858,7 +862,7 @@ void distributed_stream_loader_t::get_remote_activations(
     if (nactivations > 0) {
 #ifndef WITHOUT_CUDA
         // The rehearsal_mutex is still held
-        cudaStreamSynchronize(m_streams[2]);
+        cudaStreamSynchronize(m_streams[1]);
 #endif
 
         const auto num_bytes_representatives = nactivations * m_buffer.m_num_bytes_per_representative;

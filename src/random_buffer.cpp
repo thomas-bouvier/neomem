@@ -30,6 +30,13 @@ RandomBuffer::RandomBuffer(RehearsalConfig config)
         );
         initialize_num_bytes_per_activation();
     }
+
+#ifndef WITHOUT_CUDA
+    cudaError_t err = cudaStreamCreate(&m_stream);
+    if (err != cudaSuccess) {
+        throw std::runtime_error("CUDA stream creation failed: " + std::string(cudaGetErrorString(err)));
+    }
+#endif
 }
 
 /**
@@ -91,7 +98,7 @@ void RandomBuffer::populate(const queue_item_t& batch, unsigned int nelements)
         size_t j = m_config.N * label + index;
         ASSERT(j < m_config.K * m_config.N);
 #ifndef WITHOUT_CUDA
-        cudaStream_t stream = m_streams[1];
+        cudaStream_t stream = m_stream;
 #else
         NullStream stream;
 #endif
@@ -124,7 +131,7 @@ void RandomBuffer::populate(const queue_item_t& batch, unsigned int nelements)
 
 #ifndef WITHOUT_CUDA
     // The rehearsal_mutex is still held
-    cudaStreamSynchronize(m_streams[1]);
+    cudaStreamSynchronize(m_stream);
 #endif
 }
 

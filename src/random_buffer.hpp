@@ -9,6 +9,10 @@
 #include <memory>
 #include <thallium.hpp>
 
+#ifndef WITHOUT_CUDA
+#include "../third_party/cuda-api-wrappers/src/cuda/api.hpp"
+#endif
+
 namespace tl = thallium;
 
 enum Task { 
@@ -48,6 +52,10 @@ protected:
     std::vector<int> rehearsal_counts;
     size_t m_rehearsal_size = 0;
     std::default_random_engine m_rand_gen;
+
+#ifndef WITHOUT_CUDA
+    cudaStream_t m_stream;
+#endif
 
     void initialize_num_bytes_per_representative();
     void initialize_num_bytes_per_activation();
