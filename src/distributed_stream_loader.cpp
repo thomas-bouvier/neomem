@@ -88,6 +88,7 @@ distributed_stream_loader_t::distributed_stream_loader_t(
 
     initialize_cuda();
     initialize_rdma_buffers();
+    std::cout << "test4" << std::endl;
 }
 
 /**
@@ -123,7 +124,15 @@ void distributed_stream_loader_t::initialize_mpi() {
  */
 void distributed_stream_loader_t::initialize_cuda() {
 #ifndef WITHOUT_CUDA
-    m_local_rank = std::atoi(std::getenv("OMPI_COMM_WORLD_LOCAL_RANK"));
+    if (m_rank == -1 || m_num_workers == -1) {
+        throw std::runtime_error("initialize_mpi() should be called before initialize_cuda().");
+    }
+
+    MPI_Comm local_comm;
+    MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, m_rank, MPI_INFO_NULL, &local_comm);
+    MPI_Comm_rank(local_comm, &m_local_rank);
+    MPI_Comm_free(&local_comm);
+
     int num_devices = 0;
     cudaGetDeviceCount(&num_devices);
     cudaSetDevice(m_local_rank % num_devices);
