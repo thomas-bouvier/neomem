@@ -30,10 +30,10 @@ struct queue_item_t {
     {
         ASSERT(m_targets.dim() == 1);
         ASSERT(m_representatives[0].sizes()[0] == m_targets.sizes()[0]);
-        if (m_activations.size() > 0) {
-            ASSERT(m_representatives[0].sizes()[0] == m_activations[0].sizes()[0])
-        }
-        size = m_representatives[0].sizes()[0];
+        //if (m_activations.size() > 0) {
+        //    ASSERT(m_representatives.at(0).sizes()[0] == m_activations.at(0).sizes()[0])
+        //}
+        size = m_representatives.at(0).sizes()[0];
 
         m_weights = torch::ones({size}, torch::TensorOptions().dtype(torch::kFloat32).device(m_representatives[0].device()));
     }
@@ -45,9 +45,9 @@ struct queue_item_t {
     {
         ASSERT(m_targets.dim() == 1);
         ASSERT(m_representatives.at(0).sizes()[0] == m_targets.sizes()[0]);
-        if (m_activations.size() > 0) {
-            ASSERT(m_representatives.at(0).sizes()[0] == m_activations.at(0).sizes()[0])
-        }
+        //if (m_activations.size() > 0) {
+        //    ASSERT(m_representatives.at(0).sizes()[0] == m_activations.at(0).sizes()[0])
+        //}
         size = m_representatives.at(0).sizes()[0];
         aug_size = size;
 

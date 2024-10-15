@@ -88,7 +88,6 @@ distributed_stream_loader_t::distributed_stream_loader_t(
 
     initialize_cuda();
     initialize_rdma_buffers();
-    std::cout << "test4" << std::endl;
 }
 
 /**
