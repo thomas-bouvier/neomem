@@ -1,6 +1,11 @@
 # Neomem
 
-C++ data loader with rehearsal for Torch. Based on PyBind11 and [Mochi](https://www.mcs.anl.gov/research/projects/mochi/).
+C++ data loader with rehearsal for Torch. Based on PyBind11 and [Mochi](https://www.mcs.anl.gov/research/projects/mochi/). Have a look at [distributed-continual-learning](https://github.com/thomas-bouvier/distributed-continual-learning), a Python training codebase which interfaces with Neomem.
+
+Neomem aims to mitigate catastrophic forgetting, a common issue in traditional DNNs when handling continuous data streams. The system implements a distributed rehearsal buffer that (1) accumulates representative data samples and (2) efficiently serves augmented minibatches for further training iterations.
+
+![Some accuracy results](results.png)
+*Figure: extensive experiments on up to 128 GPUs have validated Neomem's increased accuracy, performance, and scalability.*
 
 ## Usage
 
